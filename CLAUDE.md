@@ -31,6 +31,7 @@ Ask for every feature: "Could we have known this before lights out?"
 
 ## Repo conventions
 - Reusable code in `src/f1podium/` (loading, validation, features, evaluation); analysis and narrative in `notebooks/`.
+- `scripts/build_notebook.py` is the source of truth for `notebooks/milestone1.ipynb`. Never hand-edit the `.ipynb`: change the generator, rebuild (`python scripts/build_notebook.py`), then re-execute with `jupyter nbconvert --to notebook --execute --inplace notebooks/milestone1.ipynb` using the venv (its `Scripts` folder first on PATH, or the kernel picks up the global Python).
 - Config (paths, split years, random seed) centralised; no hardcoded absolute paths.
 - Small, meaningful commits with descriptive messages. Never commit data, venvs, caches, or secrets.
 
