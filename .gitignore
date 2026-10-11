@@ -1,0 +1,32 @@
+# --- Data (never commit raw or processed data) ---
+data/
+
+# --- Virtual environment ---
+.venv/
+venv/
+env/
+
+# --- Python bytecode caches ---
+__pycache__/
+*.py[cod]
+*.pyo
+
+# --- Jupyter checkpoints and outputs ---
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# --- Build / packaging artifacts ---
+*.egg-info/
+dist/
+build/
+*.egg
+
+# --- OS / editor noise ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Secrets / environment files ---
+.env
+*.env
