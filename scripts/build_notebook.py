@@ -263,12 +263,17 @@ assert grid0["status"].notna().all(), "grid = 0 row with unknown statusId"
 grid0["positionText_group"] = grid0["positionText"].map(position_text_group)
 print("grid = 0 rows:", len(grid0))
 
-def crosstab_by_decade(row_col: str) -> pd.DataFrame:
+def crosstab_by_decade(row_col: str, top_n: int | None = None) -> pd.DataFrame:
+    \"\"\"Rows sorted by total; optionally keep the top_n rows and fold the rest into 'Other'.\"\"\"
     ct = pd.crosstab(grid0[row_col], grid0["decade"], margins=True, margins_name="Total")
     body = ct.drop(index="Total").sort_values("Total", ascending=False)
+    if top_n is not None and len(body) > top_n:
+        rest = body.iloc[top_n:]
+        other = rest.sum().rename(f"Other ({len(rest)} statuses)")
+        body = pd.concat([body.iloc[:top_n], other.to_frame().T])
     return pd.concat([body, ct.loc[["Total"]]])"""),
-    md("**`grid = 0` × status** (rows sorted by total; last row is the column total):"),
-    code("display(crosstab_by_decade(\"status\"))"),
+    md("**`grid = 0` × status**: the top 15 statuses, with the rest folded into *Other*. The last row is the column total:"),
+    code("display(crosstab_by_decade(\"status\", top_n=15))"),
     md("**`grid = 0` × positionText group:**"),
     code("display(crosstab_by_decade(\"positionText_group\"))"),
     md("""**What this shows.**
@@ -287,6 +292,68 @@ def crosstab_by_decade(row_col: str) -> pd.DataFrame:
   features. They are used here only to understand what `grid = 0` means. Failing to qualify is
   known *after qualifying*, which is our prediction cutoff, so deciding how to treat those rows
   remains an open decision rather than a leakage problem."""),
+
+    md("""#### 4.1b Non-start statuses: `grid = 0` vs `grid > 0`
+
+The other direction: start from statuses that *sound* like a non-start and check their grid value.
+`laps_gt0` counts rows that completed at least one lap, which is direct evidence that the car raced.
+
+The candidate list is for investigation only; it is **not** a non-starter definition. It includes
+*Not classified* to test it. In F1 terminology, *not classified* means the car started but covered
+too little of the race distance to be classified. `laps` is a post-race column, used here as evidence only."""),
+    code("""NON_START_CANDIDATES = [
+    "Did not qualify", "Did not prequalify", "107% Rule", "Withdrew", "Not classified",
+    "Excluded", "Injury", "Injured", "Driver unwell", "Safety concerns", "Underweight",
+]
+missing_statuses = set(NON_START_CANDIDATES) - set(tables["status"]["status"])
+assert not missing_statuses, f"not in status table: {missing_statuses}"
+
+cand = (
+    results[["raceId", "statusId", "grid", "laps"]]
+    .merge(tables["status"], on="statusId", how="left", validate="many_to_one")
+    .query("status in @NON_START_CANDIDATES")
+)
+cand["grid_group"] = np.where(cand["grid"] > 0, "grid>0", "grid=0")
+non_start_split = (
+    cand.groupby(["status", "grid_group"])
+    .agg(rows=("laps", "size"), laps_gt0=("laps", lambda s: int((s > 0).sum())))
+    .unstack("grid_group", fill_value=0)
+    .reindex(NON_START_CANDIDATES)
+    .fillna(0)
+    .astype(int)
+)
+non_start_split.columns = [f"{grid}: {measure}" for measure, grid in non_start_split.columns]
+non_start_split = non_start_split[["grid=0: rows", "grid=0: laps_gt0", "grid>0: rows", "grid>0: laps_gt0"]]
+display(non_start_split)"""),
+    md("Where the `Withdrew` rows with `grid > 0` come from (the top 5 races):"),
+    code("""withdrew_started_grid = with_year(
+    results.loc[(results["statusId"].isin(tables["status"].query("status == 'Withdrew'")["statusId"]))
+                & (results["grid"] > 0), ["raceId", "laps"]]
+).merge(races[["raceId", "name"]], on="raceId", how="left", validate="many_to_one")
+display(
+    withdrew_started_grid.groupby(["year", "name"])
+    .agg(rows=("laps", "size"), laps_gt0=("laps", lambda s: int((s > 0).sum())))
+    .sort_values("rows", ascending=False)
+    .head(5)
+)"""),
+    md("""**What this shows.**
+
+- **Most non-start statuses go with `grid = 0`, but not all of them.** *Did not prequalify* is 331 rows, all with
+  `grid = 0`. *Did not qualify* has 1,013 rows with `grid = 0` and 12 with `grid > 0`; one of those 12 even
+  completed a lap.
+- **`Withdrew` covers three different situations:**
+  - 164 rows with `grid = 0`: never took a grid slot.
+  - 61 rows with `grid > 0` and no laps: qualified, then did not start. 14 of these are the
+    2005 US GP, where most of the field withdrew after the formation lap.
+  - 23 rows with `grid > 0` and at least one lap: started the race, then withdrew.
+- **`Not classified` is not a non-start.** All 172 rows have `grid > 0` and at least one lap.
+- **Other candidates are small and mixed.**
+  - *107% Rule:* 7 of its 9 rows have `grid > 0`, but none completed a lap.
+  - *Driver unwell:* 9 of its 10 rows completed laps, so it mostly means "started, then stopped".
+  - *Excluded* and *Injury:* no `grid = 0` row completed a lap, but one `grid > 0` row each did.
+- **So neither signal is enough on its own.** `grid = 0` alone and status alone each misclassify
+  some entries. Any non-starter definition has to say which signals it uses, and whether those
+  signals are known at the prediction cutoff."""),
 
     md("""### 4.2 The 85 duplicate `(raceId, driverId)` pairs
 
