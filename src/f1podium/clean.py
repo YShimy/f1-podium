@@ -21,7 +21,14 @@ LOG_COLUMNS = [
 def resolve_duplicate_results(
     results: pd.DataFrame, races: pd.DataFrame
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Resolve duplicate (raceId, driverId) rows in `results` (rule B: the started car).
+    """Resolve duplicate (raceId, driverId) rows in `results` (rule B).
+
+    Rule B is a target-blind heuristic for the driver's primary entry. It is NOT
+    "keep the car the driver started in"; the data cannot identify that. Every
+    resolved pair in the real data has more than one row with grid > 0, and each
+    row carries *that car's* grid slot, so the lowest grid picks the better-placed
+    car the driver is listed with. What it guarantees is that the choice never
+    looks at the outcome (positions, points, status) and is deterministic.
 
     For each duplicated pair:
       1. If no row has grid > 0, every row is a non-starter: leave the rows in place
@@ -34,9 +41,9 @@ def resolve_duplicate_results(
     the duplicate pairs in this dataset (all 1978 or earlier); in modern seasons
     grid = 0 can also mean a pit-lane start.
 
-    Known limitation: in a shared drive every row carries *that car's* grid, so
-    rule 3 can keep a car the driver took over rather than the one they started
-    in. The log flags pairs where lowest grid and lowest resultId disagree.
+    Known misattributions: rule 3 can keep a car the driver took over rather than
+    the one they started in, e.g. Fagioli 1951 (raceId 828) and Brooks 1957
+    (raceId 780). The log flags pairs where lowest grid and lowest resultId disagree.
 
     Uses only grid (pre-race) and resultId (a row id): no positions, points or status.
 
