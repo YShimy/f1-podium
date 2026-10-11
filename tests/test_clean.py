@@ -1,4 +1,4 @@
-"""Tests for resolve_duplicate_results on a small fake results table."""
+"""Tests for the results cleaning steps on small fake tables."""
 
 import pandas as pd
 import pytest
@@ -8,6 +8,8 @@ from f1podium.clean import (
     STEP_LOWEST_RESULT_ID,
     STEP_NON_STARTER,
     STEP_STARTED_ROW,
+    exclude_indy500,
+    filter_non_starters,
     resolve_duplicate_results,
 )
 
@@ -112,3 +114,105 @@ def test_duplicate_result_id_is_rejected(results, races):
     bad = pd.concat([results, results.iloc[[0]]], ignore_index=True)
     with pytest.raises(ValueError, match="resultId"):
         resolve_duplicate_results(bad, races)
+
+
+# ---------------------------------------------------------------------------
+# filter_non_starters (D3)
+# ---------------------------------------------------------------------------
+
+STATUS = pd.DataFrame(
+    {
+        "statusId": [1, 2, 3, 4, 5, 6],
+        "status": ["Finished", "Did not qualify", "Did not prequalify", "107% Rule", "Withdrew", "Not classified"],
+    }
+).astype({"statusId": "Int64", "status": "string"})
+
+# resultId, raceId, driverId, statusId, grid, laps.
+# laps deliberately contradicts the expected outcome in rows 2 and 6, to prove
+# the filter never uses it.
+NON_START_ROWS = [
+    (1, 1, 101, 2, 0, 0),    # a: Did not qualify, grid 0          -> excluded
+    (2, 1, 102, 2, 12, 5),   # b: Did not qualify, grid > 0, laps  -> excluded
+    (3, 1, 103, 3, 0, 0),    # c: Did not prequalify                -> excluded
+    (4, 1, 104, 4, 20, 0),   # d: 107% Rule, grid > 0               -> excluded
+    (5, 1, 105, 5, 0, 0),    # e: Withdrew, grid 0                  -> excluded
+    (6, 1, 106, 5, 8, 0),    # f: Withdrew, grid > 0, no laps       -> kept
+    (7, 1, 107, 6, 15, 40),  # g: Not classified                    -> kept
+    (8, 1, 108, 1, 0, 57),   # h: Finished from the pit lane        -> kept
+]
+
+
+@pytest.fixture
+def entries():
+    cols = ["resultId", "raceId", "driverId", "statusId", "grid", "laps"]
+    return pd.DataFrame(NON_START_ROWS, columns=cols).astype("Int64")
+
+
+@pytest.fixture
+def one_race():
+    return pd.DataFrame({"raceId": [1], "year": [1985]}).astype("Int64")
+
+
+def test_non_starter_filter_excludes_exactly_the_non_starts(entries, one_race):
+    kept, log = filter_non_starters(entries, STATUS, one_race)
+    assert sorted(log["resultId"]) == [1, 2, 3, 4, 5]
+    assert sorted(kept["resultId"]) == [6, 7, 8]
+
+
+def test_non_starter_reasons(entries, one_race):
+    _, log = filter_non_starters(entries, STATUS, one_race)
+    reasons = dict(zip(log["resultId"], log["reason"]))
+    assert reasons == {
+        1: "status: Did not qualify",
+        2: "status: Did not qualify",
+        3: "status: Did not prequalify",
+        4: "status: 107% Rule",
+        5: "Withdrew with grid = 0",
+    }
+    assert set(log["year"]) == {1985}
+
+
+def test_withdrew_depends_on_grid_only(entries, one_race):
+    kept, log = filter_non_starters(entries, STATUS, one_race)
+    assert 5 in set(log["resultId"])   # Withdrew, grid 0
+    assert 6 in set(kept["resultId"])  # Withdrew, grid > 0 (even with 0 laps)
+
+
+def test_not_classified_and_pit_lane_start_are_kept(entries, one_race):
+    kept, _ = filter_non_starters(entries, STATUS, one_race)
+    assert {7, 8} <= set(kept["resultId"])
+
+
+def test_non_starter_row_counts_and_input_unchanged(entries, one_race):
+    before = entries.copy()
+    kept, log = filter_non_starters(entries, STATUS, one_race)
+    assert len(kept) + len(log) == len(entries)
+    pd.testing.assert_frame_equal(entries, before)
+
+
+def test_missing_status_name_is_rejected(entries, one_race):
+    no_107 = STATUS[STATUS["status"] != "107% Rule"]
+    with pytest.raises(ValueError, match="107% Rule"):
+        filter_non_starters(entries, no_107, one_race)
+
+
+# ---------------------------------------------------------------------------
+# exclude_indy500 (D2)
+# ---------------------------------------------------------------------------
+
+def test_indy500_excluded_only_at_indianapolis_in_1950_1960():
+    circuits = pd.DataFrame(
+        {"circuitId": [19, 6], "circuitRef": ["indianapolis", "monaco"]}
+    ).astype({"circuitId": "Int64", "circuitRef": "string"})
+    races = pd.DataFrame({
+        "raceId": [1, 2, 3, 4],
+        "year": [1950, 1961, 2005, 1955],
+        "circuitId": [19, 19, 19, 6],
+        "name": ["Indianapolis 500", "Hypothetical 1961 race", "United States Grand Prix", "Monaco Grand Prix"],
+    }).astype({"raceId": "Int64", "year": "Int64", "circuitId": "Int64", "name": "string"})
+    results = pd.DataFrame({"resultId": [10, 11, 20, 30, 40], "raceId": [1, 1, 2, 3, 4]}).astype("Int64")
+
+    kept, log = exclude_indy500(results, races, circuits)
+    assert sorted(kept["resultId"]) == [20, 30, 40]
+    assert log["raceId"].tolist() == [1]
+    assert log["n_rows_excluded"].tolist() == [2]

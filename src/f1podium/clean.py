@@ -1,10 +1,107 @@
-"""Cleaning steps. Each function returns new DataFrames; inputs are never modified."""
+"""Cleaning steps. Each function returns new DataFrames; inputs are never modified.
+
+Pipeline order for `results`:
+    exclude_indy500 (D2) -> filter_non_starters (D3) -> resolve_duplicate_results (D1)
+"""
 
 import pandas as pd
 
 from f1podium.validate import find_duplicates
 
 KEY = ["raceId", "driverId"]
+
+# D2: the Indianapolis 500 counted for the championship in 1950-1960.
+INDY500_CIRCUIT_REF = "indianapolis"
+INDY500_YEARS = (1950, 1960)  # inclusive
+
+# D3: statuses that mean "did not start", decided by qualifying (known at the cutoff).
+NON_START_STATUSES = ("Did not qualify", "Did not prequalify", "107% Rule")  # regardless of grid
+WITHDREW_STATUS = "Withdrew"  # a non-start only when grid == 0 (never took a grid slot)
+
+
+def _check_result_ids(results: pd.DataFrame, required: set[str]) -> None:
+    missing = required - set(results.columns)
+    if missing:
+        raise ValueError(f"results is missing columns: {sorted(missing)}")
+    if results["resultId"].isna().any() or results["resultId"].duplicated().any():
+        raise ValueError("resultId must be non-null and unique")
+
+
+def exclude_indy500(
+    results: pd.DataFrame, races: pd.DataFrame, circuits: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Exclude results of the Indianapolis 500 (D2).
+
+    A race is the Indy 500 when it was held at the circuit with circuitRef
+    "indianapolis" in 1950-1960. The year range matters: the same circuit
+    hosted the United States Grand Prix in 2000-2007, which is kept.
+
+    Returns (kept results, log with one row per excluded race).
+    """
+    _check_result_ids(results, {"resultId", "raceId"})
+    indy_circuits = circuits.loc[circuits["circuitRef"] == INDY500_CIRCUIT_REF, "circuitId"]
+    if indy_circuits.empty:
+        raise ValueError(f"no circuit with circuitRef {INDY500_CIRCUIT_REF!r}")
+
+    first, last = INDY500_YEARS
+    indy_races = races[races["circuitId"].isin(indy_circuits) & races["year"].between(first, last)]
+
+    excluded = results["raceId"].isin(indy_races["raceId"])
+    rows_per_race = results.loc[excluded, "raceId"].value_counts()
+    log = (
+        indy_races[["raceId", "year", "name"]]
+        .assign(
+            circuitRef=INDY500_CIRCUIT_REF,
+            n_rows_excluded=lambda d: d["raceId"].map(rows_per_race).fillna(0).astype(int),
+        )
+        .sort_values(["year", "raceId"], ignore_index=True)
+    )
+    return results.loc[~excluded].copy(), log
+
+
+def filter_non_starters(
+    results: pd.DataFrame, status: pd.DataFrame, races: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Exclude entries that did not start the race (D3).
+
+    A row is excluded when its status is one of NON_START_STATUSES (whatever
+    its grid), or when its status is "Withdrew" and grid == 0.
+
+    Only the status name and grid are used to select rows. The status values
+    used here are settled by qualifying, so they are known at our prediction
+    cutoff. Post-race columns such as laps are never used. Deliberately kept:
+    "Not classified" (the car started), pit-lane starts (grid == 0 with any
+    other status), and "Withdrew" with grid > 0.
+
+    Returns (kept results, log with one row per excluded result).
+    """
+    _check_result_ids(results, {"resultId", "raceId", "driverId", "statusId", "grid"})
+    needed = set(NON_START_STATUSES) | {WITHDREW_STATUS}
+    missing = needed - set(status["status"])
+    if missing:
+        raise ValueError(f"status table is missing: {sorted(missing)}")
+
+    names = results[["statusId"]].merge(status, on="statusId", how="left", validate="many_to_one")["status"]
+    if names.isna().any():
+        raise ValueError("some results have a statusId that is not in the status table")
+    names.index = results.index
+
+    by_status = names.isin(NON_START_STATUSES)
+    withdrew_no_grid = (names == WITHDREW_STATUS) & results["grid"].eq(0).fillna(False)
+    excluded = by_status | withdrew_no_grid
+
+    log = results.loc[excluded, ["resultId", "raceId", "driverId", "grid"]].assign(
+        status=names[excluded],
+        reason=pd.Series("status: ", index=names[excluded].index) + names[excluded],
+    )
+    log.loc[withdrew_no_grid[excluded], "reason"] = "Withdrew with grid = 0"
+    log = log.merge(races[["raceId", "year"]], on="raceId", how="left", validate="many_to_one")
+    if log["year"].isna().any():
+        raise ValueError("some excluded rows have a raceId that is not in races")
+    log = log[["resultId", "raceId", "driverId", "year", "status", "grid", "reason"]].sort_values(
+        ["year", "raceId", "resultId"], ignore_index=True
+    )
+    return results.loc[~excluded].copy(), log
 
 # Values of `resolving_step` in the duplicate log.
 STEP_NON_STARTER = "non_starter_filter"    # no row started -> left for the non-starter filter
@@ -49,11 +146,7 @@ def resolve_duplicate_results(
 
     Returns (cleaned results, log with one row per duplicated pair).
     """
-    missing = {"resultId", "raceId", "driverId", "grid"} - set(results.columns)
-    if missing:
-        raise ValueError(f"results is missing columns: {sorted(missing)}")
-    if results["resultId"].isna().any() or results["resultId"].duplicated().any():
-        raise ValueError("resultId must be non-null and unique (rows are dropped by resultId)")
+    _check_result_ids(results, {"resultId", "raceId", "driverId", "grid"})
 
     work = results.copy()
     dups = find_duplicates(work, KEY)
