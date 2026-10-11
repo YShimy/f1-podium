@@ -192,3 +192,71 @@ def resolve_duplicate_results(
 
     cleaned = work[~work["resultId"].isin(all_dropped)]
     return cleaned, log
+
+
+# Values of `step` in the combined clean_results log, in pipeline order.
+CLEAN_STEP_INDY500 = "D2: Indianapolis 500"
+CLEAN_STEP_NON_STARTER = "D3: non-starter"
+CLEAN_STEP_DUPLICATE = "D1: duplicate"
+
+CLEAN_LOG_COLUMNS = [
+    "step", "resultId", "raceId", "driverId", "year", "reason",
+    # D1 only (pair-level details repeated on each dropped row; <NA> for D2/D3):
+    "resolving_step", "kept_resultId", "lowest_grid_differs_from_lowest_resultId",
+]
+
+
+def clean_results(
+    results: pd.DataFrame,
+    races: pd.DataFrame,
+    circuits: pd.DataFrame,
+    status: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Run the results cleaning pipeline in its fixed order.
+
+        exclude_indy500 (D2) -> filter_non_starters (D3) -> resolve_duplicate_results (D1)
+
+    The order matters: D3 must run before D1 so that a non-starter row can never
+    be the row D1 keeps for a duplicated pair, and D2 runs first so that rows of
+    excluded races are attributed to D2 rather than to a later step.
+
+    Returns (cleaned results, combined log). The log has one row per removed
+    results row, labelled with the step that removed it.
+
+    Raises AssertionError if the cleaned table is not unique on (raceId, driverId)
+    or if the row counts do not add up.
+    """
+    no_indy, indy_log = exclude_indy500(results, races, circuits)
+    started, non_start_log = filter_non_starters(no_indy, status, races)
+    cleaned, dup_log = resolve_duplicate_results(started, races)
+
+    d2 = (
+        results.loc[results["raceId"].isin(indy_log["raceId"]), ["resultId", "raceId", "driverId"]]
+        .merge(indy_log[["raceId", "year", "name"]], on="raceId", how="left", validate="many_to_one")
+        .assign(step=CLEAN_STEP_INDY500, reason=lambda d: d["name"] + " (excluded race)")
+    )
+    d3 = non_start_log.assign(step=CLEAN_STEP_NON_STARTER)
+    d1 = (
+        dup_log.explode("dropped_resultIds")
+        .dropna(subset=["dropped_resultIds"])
+        .rename(columns={"dropped_resultIds": "resultId"})
+        .assign(
+            step=CLEAN_STEP_DUPLICATE,
+            reason=lambda d: "duplicate pair: kept resultId " + d["kept_resultId"].astype(str),
+        )
+    )
+    log = pd.concat(
+        [part.reindex(columns=CLEAN_LOG_COLUMNS) for part in (d2, d3, d1)], ignore_index=True
+    ).astype({
+        "step": "string", "resultId": "Int64", "raceId": "Int64", "driverId": "Int64", "year": "Int64",
+        "reason": "string", "resolving_step": "string", "kept_resultId": "Int64",
+        "lowest_grid_differs_from_lowest_resultId": "boolean",
+    })
+
+    if log["resultId"].duplicated().any():
+        raise AssertionError("a results row was removed by more than one step")
+    if len(cleaned) != len(results) - len(log):
+        raise AssertionError("row counts do not add up: cleaned != results - removed")
+    if cleaned.duplicated(KEY).any():
+        raise AssertionError("(raceId, driverId) is not unique after cleaning")
+    return cleaned, log

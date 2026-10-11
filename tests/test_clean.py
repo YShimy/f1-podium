@@ -8,6 +8,9 @@ from f1podium.clean import (
     STEP_LOWEST_RESULT_ID,
     STEP_NON_STARTER,
     STEP_STARTED_ROW,
+    CLEAN_STEP_INDY500,
+    CLEAN_STEP_NON_STARTER,
+    clean_results,
     exclude_indy500,
     filter_non_starters,
     resolve_duplicate_results,
@@ -216,3 +219,48 @@ def test_indy500_excluded_only_at_indianapolis_in_1950_1960():
     assert sorted(kept["resultId"]) == [20, 30, 40]
     assert log["raceId"].tolist() == [1]
     assert log["n_rows_excluded"].tolist() == [2]
+
+
+# ---------------------------------------------------------------------------
+# clean_results (pipeline: D2 -> D3 -> D1)
+# ---------------------------------------------------------------------------
+
+PIPE_CIRCUITS = pd.DataFrame(
+    {"circuitId": [19, 6], "circuitRef": ["indianapolis", "monaco"]}
+).astype({"circuitId": "Int64", "circuitRef": "string"})
+PIPE_RACES = pd.DataFrame({
+    "raceId": [1, 2],
+    "year": [1950, 1985],
+    "circuitId": [19, 6],
+    "name": ["Indianapolis 500", "Monaco Grand Prix"],
+}).astype({"raceId": "Int64", "year": "Int64", "circuitId": "Int64", "name": "string"})
+
+
+def pipeline_results(rows):
+    cols = ["resultId", "raceId", "driverId", "statusId", "grid"]
+    return pd.DataFrame(rows, columns=cols).astype("Int64")
+
+
+def test_clean_results_enforces_d2_d3_d1_order():
+    # statusId 1 = Finished, 2 = Did not qualify (see STATUS above).
+    results = pipeline_results([
+        (1, 1, 201, 2, 0),  # Indy 500 row that is also a DNQ -> must be attributed to D2, not D3
+        (2, 2, 202, 2, 2),  # duplicate pair for driver 202: DNQ with the lower grid ...
+        (3, 2, 202, 1, 9),  # ... and the car that actually raced -> must be kept
+        (4, 2, 203, 1, 1),  # ordinary row
+    ])
+    cleaned, log = clean_results(results, PIPE_RACES, PIPE_CIRCUITS, STATUS)
+
+    steps = dict(zip(log["resultId"], log["step"]))
+    assert steps == {1: CLEAN_STEP_INDY500, 2: CLEAN_STEP_NON_STARTER}
+    # If D1 ran before D3 it would keep row 2 (lower grid), drop row 3, and then
+    # D3 would remove row 2, losing driver 202 entirely.
+    assert sorted(cleaned["resultId"]) == [3, 4]
+
+
+def test_clean_results_fails_if_not_unique():
+    # Two grid-0 rows for the same driver with a status D3 does not exclude:
+    # D1 leaves such a pair for the non-starter filter, so uniqueness must fail.
+    results = pipeline_results([(1, 2, 301, 1, 0), (2, 2, 301, 1, 0)])
+    with pytest.raises(AssertionError, match="not unique"):
+        clean_results(results, PIPE_RACES, PIPE_CIRCUITS, STATUS)
