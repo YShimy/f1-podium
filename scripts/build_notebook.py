@@ -60,7 +60,16 @@ import pandas as pd
 from IPython.display import display
 
 from f1podium import config
-from f1podium.clean import STEP_NON_STARTER, resolve_duplicate_results
+from f1podium.clean import (
+    INDY500_CIRCUIT_REF,
+    INDY500_YEARS,
+    NON_START_STATUSES,
+    STEP_NON_STARTER,
+    WITHDREW_STATUS,
+    exclude_indy500,
+    filter_non_starters,
+    resolve_duplicate_results,
+)
 from f1podium.load import load_all
 from f1podium.validate import (
     find_duplicates,
@@ -498,25 +507,121 @@ plt.show()"""),
 
     md("""## 5. Findings → open decisions
 
-*To be filled in after reviewing the outputs above.*
+Decisions are labelled D1, D2, … and recorded in full in section 6.
 
-| Finding | Evidence (section) | Open decision | Proposed rule | Status |
+| Finding | Evidence (section) | Open decision | Rule | Status |
 |---|---|---|---|---|
-| 85 duplicated `(raceId, driverId)` pairs, mostly 1950s shared drives | 3.4, 4.2 | Shared-drive rule | Rule B: target-blind heuristic (started row, lowest grid, lowest resultId; see 6.1) | **Decided** |
+| 85 duplicated `(raceId, driverId)` pairs, mostly 1950s shared drives | 3.4, 4.2 | **D1** Shared-drive rule | Rule B: target-blind heuristic (started row, lowest grid, lowest resultId; see 6.3) | **Decided** |
+| 11 Indianapolis 500 races (1950–1960); they also hold 21 of the 85 duplicate pairs | 4.2 | **D2** Indy 500 exclusion | Exclude races at the Indianapolis circuit in 1950–1960 (see 6.1) | **Decided** |
+| About 1,500 entries that never started (DNQ, DNPQ, 107% rule, withdrawn without a grid slot) | 4.1, 4.1b | **D3** Non-starters | Exclude by status, plus grid for *Withdrew* (see 6.2) | **Decided** |
 | … | 3.5, 4.3 | Missing-qualifying strategy / training window | … | Pending |
-| … | 3.6, 4.1 | Meaning of `grid = 0` | … | Pending |"""),
+| `grid = 0` means "did not start" before 2000 and mostly "pit-lane start" after 2010 | 3.6, 4.1 | Meaning of `grid = 0` **as a feature** | … | Pending |"""),
 
     md("""## 6. Cleaning
 
-Cleaning steps implement decisions recorded above. Each step is a pure function in
-`src/f1podium/clean.py` that returns a new table plus a log; the raw tables are never modified."""),
+Cleaning steps implement the decisions recorded below. Each step is a pure function in
+`src/f1podium/clean.py` that returns a new table plus a log; the raw tables are never modified.
 
-    md("""### 6.1 Duplicate `(raceId, driverId)` rows in `results`
+**Pipeline order for `results`:** D2 Indianapolis 500 exclusion → D3 non-starter filter → D1 duplicate resolution.
+
+- **D2 runs first** because it removes whole races, including 21 of the duplicate pairs. Those pairs
+  then never reach the duplicate rule.
+- **D3 runs before D1** so that a did-not-qualify row can never be the row D1 keeps, and so that pairs
+  made only of non-starters disappear entirely. After D3, every remaining duplicate pair consists of
+  cars that took a grid slot."""),
+
+    md("""### 6.1 D2: Indianapolis 500 exclusion
 
 #### Decision record
 
-**Problem.** 85 driver–race pairs have more than one `results` row (176 rows, 1950–1978; see 3.4 and 4.2).
-Our grain needs exactly one row per driver per race.
+**Problem.** From 1950 to 1960 the Indianapolis 500 counted towards the drivers' championship, so it appears in
+`races` and `results`. It also accounts for 21 of the 85 duplicate pairs (4.2): relief drivers moved across teams.
+
+**Options considered**
+
+| Option | Rule | Assessment |
+|---|---|---|
+| A | Keep the races | Mixes in a race that does not behave like a Grand Prix (see *Why*). |
+| B | Keep them, with an "is Indy 500" indicator | Lets a model separate them, but 11 races are too few to learn a separate pattern from. |
+| **C** | **Exclude all results of these races** | Chosen. |
+
+**Choice: C.** Exclude every `results` row of a race held at the circuit with `circuitRef == "indianapolis"`
+in 1950–1960 (inclusive).
+
+**Why** *(drafted for your review)*. The Indy 500 was run to American (AAA/USAC) rules, with its own qualifying format
+and a field almost entirely separate from the Grand Prix regulars. Its entries therefore say little about the
+podium chances of an F1 field after qualifying, which is what we predict.
+
+**How it is identified.** It is identified by circuit **and** year range, not by name. The same circuit later hosted the
+United States Grand Prix (2000–2007), which is an ordinary F1 race and is kept. The table below shows every
+race held at the circuit. An assertion checks that the selection equals exactly the races named
+"Indianapolis 500"."""),
+    code("""indy_circuit = tables["circuits"].loc[
+    tables["circuits"]["circuitRef"] == INDY500_CIRCUIT_REF, ["circuitId", "circuitRef", "name"]
+]
+display(indy_circuit)
+
+at_indy = races[races["circuitId"].isin(indy_circuit["circuitId"])]
+display(
+    at_indy.groupby("name")
+    .agg(first_year=("year", "min"), last_year=("year", "max"), n_races=("raceId", "size"))
+    .sort_values("first_year")
+)
+print("Excluded year range (inclusive):", INDY500_YEARS)"""),
+    code("""results_no_indy, indy_log = exclude_indy500(results, races, tables["circuits"])
+
+named_indy500 = set(races.loc[races["name"] == "Indianapolis 500", "raceId"])
+assert set(indy_log["raceId"]) == named_indy500, "selection != races named 'Indianapolis 500'"
+assert len(results_no_indy) == len(results) - indy_log["n_rows_excluded"].sum(), "row count mismatch"
+
+print(f"results rows: {len(results)} -> {len(results_no_indy)} "
+      f"(excluded {indy_log['n_rows_excluded'].sum()} rows from {len(indy_log)} races)")
+display(indy_log)"""),
+
+    md("""### 6.2 D3: Non-starter filter
+
+#### Decision record
+
+**Problem.** About 1,500 `results` rows describe entries that never took the start (4.1, 4.1b). We predict podiums for
+the cars that line up after qualifying, so these rows are not part of the population we predict for.
+
+**Choice.** Exclude a row when:
+- its status is *Did not qualify*, *Did not prequalify* or *107% Rule*, whatever its grid; **or**
+- its status is *Withdrew* **and** `grid == 0`.
+
+**Why status is acceptable here.** CLAUDE.md lists `status` as a post-race column, and it is never used as a
+**feature**. Here it is used only to define *which rows are in the population*, and only through values that are
+settled by qualifying:
+- not qualifying, not prequalifying and failing the 107% rule are all decided in qualifying, so they are known at our cutoff;
+- *Withdrew* with `grid = 0` means the car never took a grid slot *(Assumption: the withdrawal is known before the start)*.
+
+**Deliberately kept:**
+- **Not classified:** these cars started (4.1b: all 172 rows completed laps).
+- **Pit-lane starts:** `grid = 0` with any other status, mostly 2010 onwards.
+- **Withdrew with `grid > 0`:** the car qualified and withdrew later. That is not known at the cutoff in general
+  (e.g. 2005 US GP), so these remain as real entries; their label is non-podium.
+
+**Never used for selection:** `laps` or any other post-race column. The diagnostic in 6.4 looks at `laps`
+afterwards, only to show what remains."""),
+    code("""results_started, non_start_log = filter_non_starters(results_no_indy, tables["status"], races)
+
+assert len(results_started) + len(non_start_log) == len(results_no_indy), "kept + excluded != input"
+assert set(non_start_log["status"]) <= set(NON_START_STATUSES) | {WITHDREW_STATUS}
+assert (non_start_log.loc[non_start_log["status"] == WITHDREW_STATUS, "grid"] == 0).all()
+
+print(f"results rows: {len(results_no_indy)} -> {len(results_started)} (excluded {len(non_start_log)})")
+display(non_start_log["reason"].value_counts().rename_axis("reason").to_frame("n_rows"))"""),
+    md("Excluded rows by status × decade:"),
+    code("""non_start_log["decade"] = (non_start_log["year"] // 10 * 10).astype(int)
+display(pd.crosstab(non_start_log["status"], non_start_log["decade"], margins=True, margins_name="Total"))"""),
+
+    md("""### 6.3 D1: Duplicate `(raceId, driverId)` rows in `results`
+
+#### Decision record
+
+**Problem.** In the raw data, 85 driver–race pairs have more than one `results` row (176 rows, 1950–1978; see 3.4 and 4.2).
+Our grain needs exactly one row per driver per race. After D2 removes the Indianapolis 500 (21 pairs) and D3 removes
+the pairs made only of non-starters (3 pairs), **61 pairs** reach this step.
 
 **Options considered**
 
@@ -528,8 +633,8 @@ Our grain needs exactly one row per driver per race.
 | D | Aggregate rows (e.g. best result, mean grid) | Creates a row that never existed: its features and label come from different cars. |
 
 **Choice: B**, applied in this order:
-1. Pairs where no row has `grid > 0` are non-starters. They are left untouched here and logged as
-   *resolved by non-starter filter*, a separate step that comes later.
+1. Pairs where no row has `grid > 0` are non-starters. They are left untouched and logged as
+   *resolved by non-starter filter*. Because D3 runs first, this step is expected never to be used; an assertion checks it.
 2. Keep the row with `grid > 0`.
 3. If several rows have `grid > 0`, keep the lowest grid.
 4. Final deterministic tie-break: the lowest `resultId`.
@@ -550,39 +655,27 @@ driver started in. *(Assumption: the lowest grid usually corresponds to the prim
   Brooks drove Moss's car (grid 1, classified 12th). B keeps resultId 20293 (P12) instead of 18806 (P1).
 
 In both cases the label changes from podium to non-podium. The log column
-`lowest_grid_differs_from_lowest_resultId` flags the 27 pairs where the lowest grid and the lowest `resultId`
-disagree. The lowest `resultId` is often the originally entered car, but it is only partial evidence,
+`lowest_grid_differs_from_lowest_resultId` flags the pairs where the lowest grid and the lowest `resultId`
+disagree (counted below). The lowest `resultId` is often the originally entered car, but it is only partial evidence,
 so these flagged pairs are where further misattributions are most likely.
 
 **Measured impact:** see the end of this section."""),
-    code("""results_dedup, dup_log = resolve_duplicate_results(results, races)
+    code("""results_dedup, dup_log = resolve_duplicate_results(results_started, races)
 
 print("Pairs per resolving step:")
 display(dup_log["resolving_step"].value_counts().rename_axis("resolving_step").to_frame("n_pairs"))
 display(dup_log)"""),
     md("""**Checks.** Every check below is an assertion, so the notebook stops if any of them fails:
 - **Row count:** the cleaned table has exactly *before − dropped* rows.
-- **Uniqueness:** `(raceId, driverId)` is unique everywhere except the pairs left for the non-starter filter.
-- **Pending pairs:** exactly those pairs are still duplicated, and nothing else is.
-- **Raw table:** `results` itself is unchanged."""),
+- **Uniqueness:** `(raceId, driverId)` is **fully** unique.
+- **No pending pairs:** the *non-starter* step was never needed, because D3 ran first."""),
     code("""n_dropped = int(dup_log["dropped_resultIds"].str.len().sum())
-assert len(results_dedup) == len(results) - n_dropped, "row count != before - dropped"
+assert len(results_dedup) == len(results_started) - n_dropped, "row count != before - dropped"
+assert not results_dedup.duplicated(["raceId", "driverId"]).any(), "(raceId, driverId) is not unique"
+assert not (dup_log["resolving_step"] == STEP_NON_STARTER).any(), "non-starter pairs reached D1"
 
-pending = dup_log.loc[dup_log["resolving_step"] == STEP_NON_STARTER, ["raceId", "driverId"]]
-flagged = results_dedup.merge(pending, on=["raceId", "driverId"], how="left", indicator=True)
-assert not flagged.loc[flagged["_merge"] == "left_only"].duplicated(["raceId", "driverId"]).any(), \\
-    "(raceId, driverId) not unique outside pending non-starter pairs"
-
-still_dup = find_duplicates(results_dedup, ["raceId", "driverId"])[["raceId", "driverId"]].drop_duplicates()
-assert set(map(tuple, still_dup.to_numpy())) == set(map(tuple, pending.to_numpy())), \\
-    "remaining duplicates are not exactly the pending non-starter pairs"
-
-assert len(results) == len(tables["results"]) == 26759, "raw results table changed"
-
-print(f"results rows: {len(results)} -> {len(results_dedup)} (dropped {n_dropped})")
-print(f"pairs left for the non-starter filter: {len(pending)} "
-      f"({len(find_duplicates(results_dedup, ['raceId', 'driverId']))} rows)")
-print("All checks passed.")"""),
+print(f"results rows: {len(results_started)} -> {len(results_dedup)} (dropped {n_dropped} rows in {len(dup_log)} pairs)")
+print("All checks passed: (raceId, driverId) is unique.")"""),
 
     md("""#### Sensitivity check: rule B vs rule A (best `positionOrder`)
 
@@ -590,8 +683,7 @@ For each pair that rule B resolved, we also apply rule A (best `positionOrder`, 
 We then count how often the two rules keep a different row, and how often the **podium label**
 (`positionOrder <= 3`) differs. This shows how much the label depends on the choice.
 `positionOrder` is used here only to measure this; it plays no part in rule B itself."""),
-    code("""started_pairs = dup_log[dup_log["resolving_step"] != STEP_NON_STARTER]
-dup_rows_all = find_duplicates(results, ["raceId", "driverId"])
+    code("""dup_rows_all = find_duplicates(results_started, ["raceId", "driverId"])
 
 rule_a = (
     dup_rows_all.sort_values(["positionOrder", "resultId"])
@@ -600,11 +692,11 @@ rule_a = (
     .rename(columns={"resultId": "kept_A"})
 )
 compare = (
-    started_pairs[["year", "raceId", "driverId", "kept_resultId", "lowest_grid_differs_from_lowest_resultId"]]
+    dup_log[["year", "raceId", "driverId", "kept_resultId", "lowest_grid_differs_from_lowest_resultId"]]
     .rename(columns={"kept_resultId": "kept_B"})
     .merge(rule_a, on=["raceId", "driverId"], how="left", validate="one_to_one")
 )
-by_id = results.set_index("resultId")
+by_id = results_started.set_index("resultId")
 for rule in ("A", "B"):
     kept = compare[f"kept_{rule}"]
     compare[f"grid_{rule}"] = kept.map(by_id["grid"])
@@ -630,21 +722,70 @@ display(sensitivity)"""),
       "kept_A", "grid_A", "positionOrder_A", "lowest_grid_differs_from_lowest_resultId"]]
     .reset_index(drop=True)
 )"""),
-    md("""**Measured impact.**
+    md("""**Measured impact** (on the D3 output, i.e. after the Indy 500 and non-starters are removed).
 
-- **Rows.** `results` goes from 26,759 to 26,671 rows: 88 rows dropped across 82 resolved pairs.
-  The 3 all-non-starter pairs (6 rows) remain until the non-starter filter runs. The raw table is unchanged.
-- **Steps used.** 81 pairs were resolved by *lowest grid* and 1 by the *lowest resultId* tie-break.
-  *Single started row* never occurs in the real data; only the unit test covers it. Every resolved pair has
-  `grid > 0` on all its rows, which is why step 3 does almost all the work.
-- **Sensitivity to the rule.** Rules A and B keep a different row in 56 of 82 pairs, but the **podium label
-  differs in only 17 pairs**. All 17 go the same way: rule A gives a podium and rule B does not
-  (22 vs 5 podium labels in these pairs). So rule A would add 17 podium labels, which is the inflation
-  described above. All 17 are from 1950–1960, inside the training period; validation and test rows are unaffected.
-- **Where the heuristic misattributes.** 4 of the 17 flips are flagged pairs (lowest grid ≠ lowest resultId).
-  Two of them are the known misattributions listed in the decision record (Fagioli 1951, Brooks 1957).
-  For these drivers, B keeps the car they took over, not the one they started in. This is accepted for now.
-  A possible follow-up (Experiment) is to put the lowest-resultId tie-break before the lowest-grid one and re-measure."""),
+- **Rows.** 24,825 → 24,761: 64 rows dropped across 61 pairs. `(raceId, driverId)` is now fully unique.
+  For comparison, on raw `results` the same rule would see 85 pairs. 21 of those were Indy 500 pairs (removed by D2),
+  and 3 were made only of non-starters (removed by D3).
+- **Steps used.** 60 pairs were resolved by *lowest grid* and 1 by the *lowest resultId* tie-break. *Single started row*
+  and *non-starter* were never used. Every pair has `grid > 0` on all its rows, which is why step 3 does almost all the work.
+- **Sensitivity to the rule.** Rules A and B keep a different row in 44 of 61 pairs, but the **podium label differs in
+  17 pairs**. All 17 go the same way: rule A gives a podium and rule B does not (21 vs 4 podium labels in these pairs).
+  So rule A would add 17 podium labels. All 17 are from 1950–1960, inside the training period; validation and test rows
+  are unaffected.
+- **Where the heuristic misattributes.** 16 of the 61 pairs are flagged (lowest grid ≠ lowest resultId). 4 of the 17 flips are
+  flagged, including the two known misattributions (Fagioli 1951, Brooks 1957). This is accepted for now. A possible
+  follow-up (Experiment) is to put the lowest-resultId tie-break before the lowest-grid one and re-measure."""),
+
+    md("""### 6.4 Pipeline summary
+
+Row counts after each step, with assertions that they chain exactly and that the final table has one row
+per `(raceId, driverId)`."""),
+    code("""pipeline_counts = pd.DataFrame(
+    [
+        ("raw results", len(results), 0),
+        ("after D2: Indianapolis 500 exclusion", len(results_no_indy), int(indy_log["n_rows_excluded"].sum())),
+        ("after D3: non-starter filter", len(results_started), len(non_start_log)),
+        ("after D1: duplicate resolution", len(results_dedup), n_dropped),
+    ],
+    columns=["step", "rows", "rows_removed"],
+).set_index("step")
+display(pipeline_counts)
+
+assert (pipeline_counts["rows"].diff().dropna().astype(int) == -pipeline_counts["rows_removed"].iloc[1:]).all(), \\
+    "row counts do not chain"
+assert not results_dedup.duplicated(["raceId", "driverId"]).any(), "final table is not unique"
+assert len(results) == len(tables["results"]) == 26759, "raw results table changed"
+results_clean = results_dedup
+print(f"results_clean: {len(results_clean)} rows, one per (raceId, driverId).")"""),
+
+    md("""#### Diagnostic: remaining rows with `laps == 0`
+
+**Diagnostic only, not used to select rows.** `laps` is a post-race column. This table shows what is left in
+`results_clean` among entries that completed no lap, so we can see whether the population looks right."""),
+    code("""remaining_no_laps = (
+    results_clean.loc[results_clean["laps"] == 0, ["statusId", "grid"]]
+    .merge(tables["status"], on="statusId", how="left", validate="many_to_one")
+)
+remaining_no_laps["grid_group"] = np.where(remaining_no_laps["grid"] > 0, "grid>0", "grid=0")
+no_laps_by_status = pd.crosstab(remaining_no_laps["status"], remaining_no_laps["grid_group"], margins=True, margins_name="Total")
+no_laps_by_status = pd.concat([
+    no_laps_by_status.drop(index="Total").sort_values("Total", ascending=False),
+    no_laps_by_status.loc[["Total"]],
+])
+print(f"remaining rows with laps == 0: {len(remaining_no_laps)} of {len(results_clean)}")
+display(no_laps_by_status.head(16))"""),
+    md("""**What this shows** (diagnostic only; nothing here changes the selection).
+
+- **995 of the 24,761 remaining rows completed no lap.** Most are real starts that ended on the first lap:
+  *Collision* (353) and *Accident* (242) with `grid > 0`, plus mechanical failures (*Engine*, *Gearbox*, *Clutch*, …).
+  These are entries with a correct non-podium label.
+- **61 *Withdrew* rows with `grid > 0` remain by design (D3).** The car qualified and withdrew later, which is not known
+  at our cutoff, so it stays as a non-podium entry. The 2005 US GP accounts for 14 of them.
+- **56 rows have `grid = 0` and no laps** (1954–2023; 8 of them from 2000 onwards). They are mostly *Accident* (18),
+  *Injury* (8), *Excluded* (6), *Disqualified* (6) and *Engine* (6). Some of these may be entries that never started
+  (for example, an accident in practice). D3 does not catch them, because their status does not say "did not start".
+  *Unknown:* how many of them actually took the start. This is noted here only; any change to D3 would be a new decision."""),
 ]
 
 nb = new_notebook(cells=cells)
