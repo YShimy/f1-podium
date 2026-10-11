@@ -61,14 +61,15 @@ from IPython.display import display
 
 from f1podium import config
 from f1podium.clean import (
+    CLEAN_STEP_DUPLICATE,
+    CLEAN_STEP_INDY500,
+    CLEAN_STEP_NON_STARTER,
     INDY500_CIRCUIT_REF,
     INDY500_YEARS,
     NON_START_STATUSES,
     STEP_NON_STARTER,
     WITHDREW_STATUS,
-    exclude_indy500,
-    filter_non_starters,
-    resolve_duplicate_results,
+    clean_results,
 )
 from f1podium.load import load_all
 from f1podium.validate import (
@@ -528,7 +529,20 @@ Cleaning steps implement the decisions recorded below. Each step is a pure funct
   then never reach the duplicate rule.
 - **D3 runs before D1** so that a did-not-qualify row can never be the row D1 keeps, and so that pairs
   made only of non-starters disappear entirely. After D3, every remaining duplicate pair consists of
-  cars that took a grid slot."""),
+  cars that took a grid slot.
+
+The whole pipeline is one call, `clean_results`, which fixes this order (a unit test fails if the order changes)
+and itself raises if `(raceId, driverId)` is not unique at the end. It returns the cleaned table and a
+**combined log** with one row per removed `results` row, labelled with the step that removed it. Sections
+6.1–6.3 below read their per-step views from that log."""),
+    code("""results_clean, clean_log = clean_results(results, races, tables["circuits"], tables["status"])
+
+print(f"results rows: {len(results)} -> {len(results_clean)} (removed {len(clean_log)})")
+display(clean_log["step"].value_counts().rename_axis("step").to_frame("rows_removed"))
+
+def log_rows(step: str) -> pd.DataFrame:
+    \"\"\"Rows of the combined log removed by one step.\"\"\"
+    return clean_log[clean_log["step"] == step]"""),
 
     md("""### 6.1 D2: Indianapolis 500 exclusion
 
@@ -568,15 +582,19 @@ display(
     .sort_values("first_year")
 )
 print("Excluded year range (inclusive):", INDY500_YEARS)"""),
-    code("""results_no_indy, indy_log = exclude_indy500(results, races, tables["circuits"])
+    code("""indy_rows = log_rows(CLEAN_STEP_INDY500)
+indy_log = (
+    indy_rows.groupby(["raceId", "year"]).size().rename("n_rows_excluded").reset_index()
+    .merge(races[["raceId", "name"]], on="raceId", how="left", validate="one_to_one")
+    .sort_values("year", ignore_index=True)
+)
 
 named_indy500 = set(races.loc[races["name"] == "Indianapolis 500", "raceId"])
 assert set(indy_log["raceId"]) == named_indy500, "selection != races named 'Indianapolis 500'"
-assert len(results_no_indy) == len(results) - indy_log["n_rows_excluded"].sum(), "row count mismatch"
+assert len(indy_rows) == results["raceId"].isin(named_indy500).sum(), "not every Indy 500 row was removed"
 
-print(f"results rows: {len(results)} -> {len(results_no_indy)} "
-      f"(excluded {indy_log['n_rows_excluded'].sum()} rows from {len(indy_log)} races)")
-display(indy_log)"""),
+print(f"D2 removed {len(indy_rows)} rows from {len(indy_log)} races")
+display(indy_log[["raceId", "year", "name", "n_rows_excluded"]])"""),
 
     md("""### 6.2 D3: Non-starter filter
 
@@ -603,13 +621,15 @@ settled by qualifying:
 
 **Never used for selection:** `laps` or any other post-race column. The diagnostic in 6.4 looks at `laps`
 afterwards, only to show what remains."""),
-    code("""results_started, non_start_log = filter_non_starters(results_no_indy, tables["status"], races)
-
-assert len(results_started) + len(non_start_log) == len(results_no_indy), "kept + excluded != input"
+    code("""non_start_log = (
+    log_rows(CLEAN_STEP_NON_STARTER)
+    .merge(results[["resultId", "statusId", "grid"]], on="resultId", how="left", validate="one_to_one")
+    .merge(tables["status"], on="statusId", how="left", validate="many_to_one")
+)
 assert set(non_start_log["status"]) <= set(NON_START_STATUSES) | {WITHDREW_STATUS}
 assert (non_start_log.loc[non_start_log["status"] == WITHDREW_STATUS, "grid"] == 0).all()
 
-print(f"results rows: {len(results_no_indy)} -> {len(results_started)} (excluded {len(non_start_log)})")
+print(f"D3 removed {len(non_start_log)} rows")
 display(non_start_log["reason"].value_counts().rename_axis("reason").to_frame("n_rows"))"""),
     md("Excluded rows by status × decade:"),
     code("""non_start_log["decade"] = (non_start_log["year"] // 10 * 10).astype(int)
@@ -660,21 +680,37 @@ disagree (counted below). The lowest `resultId` is often the originally entered 
 so these flagged pairs are where further misattributions are most likely.
 
 **Measured impact:** see the end of this section."""),
-    code("""results_dedup, dup_log = resolve_duplicate_results(results_started, races)
+    code("""# One row per duplicated pair, rebuilt from the combined log (one log row per dropped results row).
+dup_log = (
+    log_rows(CLEAN_STEP_DUPLICATE)
+    .groupby(["raceId", "driverId"], as_index=False)
+    .agg(
+        year=("year", "first"),
+        n_rows=("resultId", lambda s: len(s) + 1),  # dropped rows + the kept row
+        resolving_step=("resolving_step", "first"),
+        kept_resultId=("kept_resultId", "first"),
+        dropped_resultIds=("resultId", lambda s: sorted(int(x) for x in s)),
+        lowest_grid_differs_from_lowest_resultId=("lowest_grid_differs_from_lowest_resultId", "first"),
+    )
+    .sort_values(["year", "raceId", "driverId"], ignore_index=True)
+)
 
 print("Pairs per resolving step:")
 display(dup_log["resolving_step"].value_counts().rename_axis("resolving_step").to_frame("n_pairs"))
 display(dup_log)"""),
-    md("""**Checks.** Every check below is an assertion, so the notebook stops if any of them fails:
-- **Row count:** the cleaned table has exactly *before − dropped* rows.
+    md("""**Checks.** Every check below is an assertion, so the notebook stops if any of them fails.
+`clean_results` already raises if the final table is not unique; these repeat the checks visibly:
+- **Row count:** the cleaned table has exactly *raw − removed* rows.
 - **Uniqueness:** `(raceId, driverId)` is **fully** unique.
-- **No pending pairs:** the *non-starter* step was never needed, because D3 ran first."""),
+- **No pending pairs:** the *non-starter* step of D1 was never needed, because D3 ran first.
+- **Kept rows exist:** every pair's kept row is in the cleaned table."""),
     code("""n_dropped = int(dup_log["dropped_resultIds"].str.len().sum())
-assert len(results_dedup) == len(results_started) - n_dropped, "row count != before - dropped"
-assert not results_dedup.duplicated(["raceId", "driverId"]).any(), "(raceId, driverId) is not unique"
+assert len(results_clean) == len(results) - len(clean_log), "row count != raw - removed"
+assert not results_clean.duplicated(["raceId", "driverId"]).any(), "(raceId, driverId) is not unique"
 assert not (dup_log["resolving_step"] == STEP_NON_STARTER).any(), "non-starter pairs reached D1"
+assert dup_log["kept_resultId"].isin(results_clean["resultId"]).all(), "a kept row is missing"
 
-print(f"results rows: {len(results_started)} -> {len(results_dedup)} (dropped {n_dropped} rows in {len(dup_log)} pairs)")
+print(f"D1 dropped {n_dropped} rows in {len(dup_log)} pairs")
 print("All checks passed: (raceId, driverId) is unique.")"""),
 
     md("""#### Sensitivity check: rule B vs rule A (best `positionOrder`)
@@ -683,7 +719,10 @@ For each pair that rule B resolved, we also apply rule A (best `positionOrder`, 
 We then count how often the two rules keep a different row, and how often the **podium label**
 (`positionOrder <= 3`) differs. This shows how much the label depends on the choice.
 `positionOrder` is used here only to measure this; it plays no part in rule B itself."""),
-    code("""dup_rows_all = find_duplicates(results_started, ["raceId", "driverId"])
+    code("""# The rows D1 chose between: each pair's kept row plus its dropped rows.
+pair_result_ids = set(dup_log["kept_resultId"]) | {r for ids in dup_log["dropped_resultIds"] for r in ids}
+dup_rows_all = results[results["resultId"].isin(pair_result_ids)]
+assert len(dup_rows_all) == dup_log["n_rows"].sum(), "pair rows do not match the log"
 
 rule_a = (
     dup_rows_all.sort_values(["positionOrder", "resultId"])
@@ -696,7 +735,7 @@ compare = (
     .rename(columns={"kept_resultId": "kept_B"})
     .merge(rule_a, on=["raceId", "driverId"], how="left", validate="one_to_one")
 )
-by_id = results_started.set_index("resultId")
+by_id = results.set_index("resultId")
 for rule in ("A", "B"):
     kept = compare[f"kept_{rule}"]
     compare[f"grid_{rule}"] = kept.map(by_id["grid"])
@@ -741,22 +780,18 @@ display(sensitivity)"""),
 
 Row counts after each step, with assertions that they chain exactly and that the final table has one row
 per `(raceId, driverId)`."""),
-    code("""pipeline_counts = pd.DataFrame(
-    [
-        ("raw results", len(results), 0),
-        ("after D2: Indianapolis 500 exclusion", len(results_no_indy), int(indy_log["n_rows_excluded"].sum())),
-        ("after D3: non-starter filter", len(results_started), len(non_start_log)),
-        ("after D1: duplicate resolution", len(results_dedup), n_dropped),
-    ],
-    columns=["step", "rows", "rows_removed"],
-).set_index("step")
+    code("""step_order = [CLEAN_STEP_INDY500, CLEAN_STEP_NON_STARTER, CLEAN_STEP_DUPLICATE]
+removed = clean_log["step"].value_counts().reindex(step_order, fill_value=0)
+pipeline_counts = pd.DataFrame({
+    "rows_removed": [0, *removed.tolist()],
+    "rows": [len(results), *(len(results) - removed.cumsum()).tolist()],
+}, index=pd.Index(["raw results", *[f"after {s}" for s in step_order]], name="step"))
 display(pipeline_counts)
 
-assert (pipeline_counts["rows"].diff().dropna().astype(int) == -pipeline_counts["rows_removed"].iloc[1:]).all(), \\
-    "row counts do not chain"
-assert not results_dedup.duplicated(["raceId", "driverId"]).any(), "final table is not unique"
+assert pipeline_counts["rows"].iloc[-1] == len(results_clean), "row counts do not chain to the cleaned table"
+assert set(clean_log["step"]) <= set(step_order), "unexpected step label in the log"
+assert not results_clean.duplicated(["raceId", "driverId"]).any(), "final table is not unique"
 assert len(results) == len(tables["results"]) == 26759, "raw results table changed"
-results_clean = results_dedup
 print(f"results_clean: {len(results_clean)} rows, one per (raceId, driverId).")"""),
 
     md("""#### Diagnostic: remaining rows with `laps == 0`
@@ -786,6 +821,50 @@ display(no_laps_by_status.head(16))"""),
   *Injury* (8), *Excluded* (6), *Disqualified* (6) and *Engine* (6). Some of these may be entries that never started
   (for example, an accident in practice). D3 does not catch them, because their status does not say "did not start".
   *Unknown:* how many of them actually took the start. This is noted here only; any change to D3 would be a new decision."""),
+
+    md("""#### Diagnostic: the remaining `grid = 0` rows with no laps
+
+**Diagnostic only, not used to select rows.** These are the 56 rows from the note above: `grid == 0` and `laps == 0`
+in `results_clean`. Their statuses do not say "did not start", so D3 keeps them, but some look non-start-like.
+They are grouped by status and by era. The era boundary is 2003, the first season with complete qualifying
+data (4.3)."""),
+    code("""grid0_no_laps = (
+    results_clean.loc[(results_clean["grid"] == 0) & (results_clean["laps"] == 0),
+                      ["resultId", "raceId", "driverId", "statusId", "grid", "laps"]]
+    .merge(tables["status"], on="statusId", how="left", validate="many_to_one")
+    .merge(races[["raceId", "year", "name"]], on="raceId", how="left", validate="many_to_one")
+    .merge(tables["drivers"][["driverId", "driverRef"]], on="driverId", how="left", validate="many_to_one")
+)
+grid0_no_laps["era"] = np.where(grid0_no_laps["year"] < 2003, "before 2003", "2003+")
+print(f"remaining rows with grid == 0 and laps == 0: {len(grid0_no_laps)}")
+
+by_status_era = pd.crosstab(grid0_no_laps["status"], grid0_no_laps["era"], margins=True, margins_name="Total")
+by_status_era = pd.concat([
+    by_status_era.drop(index="Total").sort_values("Total", ascending=False),
+    by_status_era.loc[["Total"]],
+])[["before 2003", "2003+", "Total"]]
+display(by_status_era)"""),
+    md("All rows, by era and year:"),
+    code("""display(
+    grid0_no_laps.sort_values(["era", "year", "raceId"], ascending=[False, True, True])
+    [["era", "year", "name", "driverRef", "status", "grid", "laps", "resultId"]]
+    .reset_index(drop=True)
+)"""),
+    md("""**What this shows** (diagnostic only; nothing here changes the selection or decides anything).
+
+- **51 of the 56 rows are from before 2003 and 5 are from 2003 onwards.** Before 2003 they are mostly *Accident* (18),
+  *Injury*/*Injured* (9), *Excluded* (6), *Disqualified* (6) and *Engine* (5). From 2003 there is one row each for
+  *Injury*, *Fuel system*, *Battery*, *Brakes* and *Engine*.
+- **Many look like entries that never took the start.** From general F1 history (outside this dataset, not verified
+  against it), several rows are well-known non-starts:
+  - Rindt 1970, Cevert 1973, Villeneuve 1982 and Ratzenberger 1994 were fatal accidents in practice or qualifying.
+  - Barrichello and Wendlinger in 1994, and Pérez at Monaco 2011, were injured in practice or qualifying.
+  - Leclerc (São Paulo 2023) and Tsunoda (Monza 2021) did not make it to the start.
+- **The timing differs between cases, which matters for our cutoff.** Some of these were known by the end of qualifying,
+  such as injuries in practice or qualifying. Others happened after qualifying, on the way to the grid or on the
+  formation lap, so they were not known at our cutoff. *Excluded* and *Disqualified* with no laps may also be
+  qualifying-related decisions. *Unknown:* which rows fall into which group; the dataset has no column that says.
+- **Scale.** 56 rows out of 24,761, all with a non-podium label. Any change to D3 for them would be a new decision."""),
 ]
 
 nb = new_notebook(cells=cells)
