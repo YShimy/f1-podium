@@ -109,8 +109,16 @@ SRC_DIR, SRC_COMMIT = _add_src_to_path()
 print("src dir    :", SRC_DIR)
 print("src commit :", SRC_COMMIT or "none (using the repo's src/, not a packaged copy)")
 
-%load_ext autoreload
-%autoreload 2"""),
+# autoreload is a local-development convenience. IPython's autoreload imports `imp`, which does not
+# exist on Python 3.13 (Kaggle), so skip it there and never let it stop the notebook.
+if SRC_COMMIT or Path("/kaggle/input").exists():
+    print("autoreload skipped (Kaggle / packaged src)")
+else:
+    try:
+        get_ipython().run_line_magic("load_ext", "autoreload")
+        get_ipython().run_line_magic("autoreload", "2")
+    except Exception as exc:
+        print(f"autoreload unavailable: {exc}")"""),
     code("""import numpy as np
 import pandas as pd
 from IPython.display import display

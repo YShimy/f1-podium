@@ -91,3 +91,22 @@ def test_flat_and_datasets_owner_slug_layouts(setup_ns, restore_path, tmp_path, 
     make_src(src, version_in_src=True)
     found, commit = setup_ns["_add_src_to_path"](tmp_path)
     assert found == src and commit == "abc123"
+
+
+def _setup_cell_source():
+    for node in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8"))):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and "def _add_src_to_path" in node.value):
+            return node.value
+    pytest.fail("Setup cell not found in build_notebook.py")
+
+
+def test_autoreload_is_guarded_and_never_a_bare_magic():
+    src = _setup_cell_source()
+    lines = [line.strip() for line in src.splitlines()]
+    assert not any(line.startswith(("%load_ext", "%autoreload")) for line in lines)
+    assert 'run_line_magic("load_ext", "autoreload")' in src
+    try_at = src.index("try:\n        get_ipython()")
+    assert try_at < src.index('run_line_magic("load_ext"') < src.index("except Exception")
+    assert 'print(f"autoreload unavailable: {exc}")' in src
+    assert 'Path("/kaggle/input").exists()' in src
