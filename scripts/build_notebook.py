@@ -19,6 +19,16 @@ DEFAULT_OUT = Path(__file__).resolve().parents[1] / "notebooks" / "milestone1.ip
 out = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_OUT
 md, code = new_markdown_cell, new_code_cell
 
+# Pinned versions from requirements.txt, embedded in the Setup cell so the check also works on
+# Kaggle (where requirements.txt is not available).
+REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements.txt"
+PINS = {}
+for _line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+    _line = _line.split("#")[0].strip()
+    if "==" in _line:
+        _name, _ver = _line.split("==")
+        PINS[_name.strip()] = _ver.strip()
+
 cells = [
     md("""# F1 Podium Prediction — Milestone 1
 
@@ -37,23 +47,55 @@ Reusable code lives in `src/f1podium/`."""),
     md("""## 1. Setup
 
 Make the `src/` folder importable.
-- **On Kaggle:** if a dataset under `/kaggle/input` contains `src/VERSION` (made by `scripts/package_kaggle.py`),
-  that packaged `src/` is used and its **commit hash is printed**. Check that it matches the final commit before submitting.
+- **On Kaggle:** `/kaggle/input` is searched (up to 6 levels deep) for a `src/` folder containing `f1podium/` and a
+  `VERSION` file (inside or beside `src/`; made by `scripts/package_kaggle.py`). That packaged `src/` is used and its
+  **commit hash is printed**. Check that it matches the final commit before submitting. If `/kaggle/input` exists but
+  no such folder is found, the cell stops with an error listing what is there.
 - **Otherwise:** the repo's `src/`, found by searching upwards from the current folder, so the same cell works
   from `notebooks/` or from the repo root."""),
-    code("""import sys
+    code("""import os
+import sys
 from pathlib import Path
 
-def _add_src_to_path():
+def _find_kaggle_src(root, max_depth=6):
+    # First directory named "src" (walking sorted, depth <= max_depth) that contains f1podium/ and
+    # has VERSION either inside src/ or beside it. Returns (src, version_file) or None.
+    root = Path(root)
+    for dirpath, dirnames, _ in os.walk(root):
+        dirnames.sort()
+        here = Path(dirpath)
+        if len(here.relative_to(root).parts) >= max_depth:
+            dirnames[:] = []
+        if here.name == "src" and (here / "f1podium").is_dir():
+            for version_file in (here / "VERSION", here.parent / "VERSION"):
+                if version_file.is_file():
+                    return here, version_file
+    return None
+
+def _describe_tree(root, max_depth=4):
+    lines = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        depth = len(Path(dirpath).relative_to(root).parts)
+        lines.append("  " * depth + (Path(dirpath).name or str(root)) + "/")
+        lines.extend("  " * (depth + 1) + name for name in sorted(filenames))
+        if depth >= max_depth:
+            dirnames[:] = []
+    return "\\n".join(lines)
+
+def _add_src_to_path(kaggle_input=Path("/kaggle/input")):
     # Returns (src dir, commit hash or None) and puts the src dir first on sys.path.
-    # 1. Kaggle: a dataset made by scripts/package_kaggle.py has <dataset>/src/VERSION.
-    kaggle_input = Path("/kaggle/input")
+    # 1. Kaggle: a dataset made by scripts/package_kaggle.py has src/ and VERSION (inside or beside src/).
     if kaggle_input.exists():
-        for pattern in ("*/src/VERSION", "*/*/src/VERSION"):
-            for version_file in sorted(kaggle_input.glob(pattern)):
-                src = version_file.parent
-                sys.path.insert(0, str(src))
-                return src, version_file.read_text().strip()
+        found = _find_kaggle_src(kaggle_input)
+        if found is None:
+            raise FileNotFoundError(
+                "No src/ (with f1podium/ and VERSION) found under " + str(kaggle_input)
+                + ". Contents (depth <= 4):\\n" + _describe_tree(kaggle_input)
+            )
+        src, version_file = found
+        sys.path.insert(0, str(src))
+        return src, version_file.read_text().strip()
     # 2. Otherwise the repo's src/, found by searching upwards from the working directory.
     for base in [Path.cwd(), *Path.cwd().parents]:
         if (base / "src" / "f1podium").is_dir():
@@ -103,12 +145,21 @@ pd.set_option("display.width", 200)
 np.random.seed(config.RANDOM_SEED)
 
 print("Python     :", sys.version.split()[0], "|", sys.executable)
-print("pandas     :", pd.__version__)
+
+import warnings
+from importlib.metadata import version as _pkg_version
+
+PINNED = __PINS__   # from requirements.txt at build time
+for _pkg in ["pandas", "numpy", "scikit-learn", "scipy", "statsmodels"]:
+    _installed = _pkg_version(_pkg)
+    print(f"{_pkg:<11}: {_installed}")
+    if _pkg in PINNED and _installed != PINNED[_pkg]:
+        warnings.warn(f"{_pkg} {_installed} differs from requirements.txt pin {PINNED[_pkg]}")
 print("src        :", SRC_DIR)
 print("raw data   :", config.RAW_DIR)
 print("split      : train <=", config.TRAIN_END_YEAR, "| val", config.VAL_YEARS,
       "| test >=", config.TEST_START_YEAR)
-print("seed       :", config.RANDOM_SEED)"""),
+print("seed       :", config.RANDOM_SEED)""".replace("__PINS__", repr(PINS))),
 
     md("""## 2. Data Loading
 

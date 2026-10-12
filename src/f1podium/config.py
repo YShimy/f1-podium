@@ -12,6 +12,34 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 KAGGLE_INPUT = Path("/kaggle/input")
+KAGGLE_MAX_DEPTH = 6   # Kaggle mounts at /kaggle/input/datasets/<owner>/<slug>/..., so search deeply
+ERROR_TREE_DEPTH = 4
+
+
+def describe_tree(root: Path, max_depth: int = ERROR_TREE_DEPTH) -> str:
+    """Indented listing of root (directories and files) down to max_depth, for error messages."""
+    lines = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        here = Path(dirpath)
+        depth = len(here.relative_to(root).parts)
+        lines.append("  " * depth + (here.name or str(root)) + "/")
+        lines.extend("  " * (depth + 1) + name for name in sorted(filenames))
+        if depth >= max_depth:
+            dirnames[:] = []
+    return "\n".join(lines)
+
+
+def find_folder_with_file(root: Path, filename: str, max_depth: int = KAGGLE_MAX_DEPTH) -> Path | None:
+    """First folder (sorted walk, at most max_depth levels below root) containing filename."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        here = Path(dirpath)
+        if filename in filenames:
+            return here
+        if len(here.relative_to(root).parts) >= max_depth:
+            dirnames[:] = []
+    return None
 
 
 def find_raw_dir(kaggle_input: Path = KAGGLE_INPUT, default: Path | None = None) -> Path:
@@ -19,9 +47,9 @@ def find_raw_dir(kaggle_input: Path = KAGGLE_INPUT, default: Path | None = None)
 
     Order:
       1. F1_DATA_DIR environment variable (explicit override).
-      2. If the Kaggle input folder exists: the first folder under it that contains
-         races.csv (sorted, so the choice is deterministic). Raises if there is none,
-         so a missing dataset fails here with a clear message.
+      2. If the Kaggle input folder exists: the first folder under it (up to 6 levels deep,
+         sorted, so the choice is deterministic) that contains races.csv. Raises, listing
+         the folder tree, if there is none, rather than falling back to the repo.
       3. Otherwise data/raw in the repo.
     """
     env_dir = os.environ.get("F1_DATA_DIR")
@@ -29,11 +57,13 @@ def find_raw_dir(kaggle_input: Path = KAGGLE_INPUT, default: Path | None = None)
         return Path(env_dir)
 
     if kaggle_input.exists():
-        for races_csv in sorted(kaggle_input.rglob("races.csv")):
-            return races_csv.parent
+        found = find_folder_with_file(kaggle_input, "races.csv")
+        if found is not None:
+            return found
         raise FileNotFoundError(
-            f"{kaggle_input} exists but no races.csv was found under it. "
-            "Add the Formula 1 dataset to this notebook's inputs."
+            f"{kaggle_input} exists but no races.csv was found under it (searched {KAGGLE_MAX_DEPTH} levels). "
+            "Add the Formula 1 dataset to this notebook's inputs. Contents "
+            f"(depth <= {ERROR_TREE_DEPTH}):\n{describe_tree(kaggle_input)}"
         )
 
     return default if default is not None else PROJECT_ROOT / "data" / "raw"
