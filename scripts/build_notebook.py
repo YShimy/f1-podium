@@ -85,6 +85,7 @@ from f1podium.clean import (
     WITHDREW_STATUS,
     clean_results,
 )
+from f1podium import de_questions as de
 from f1podium import plots
 from f1podium.eda import rate_by, with_podium
 from f1podium.load import load_all
@@ -1147,6 +1148,320 @@ display(missing_by_season.loc[2003:, ["qualifying position missing", "q1 missing
 - **The meaning of `grid = 0`:** it is a small but growing modern share.
 
 *(All evidence only; none of these decisions is made here.)*"""),
+
+    md("""## 8. Data-engineering questions
+
+Descriptive questions about the sport, answered from the cleaned results. Reusable code is in
+`src/f1podium/de_questions.py`.
+
+> **Cutoff note.** These analyses use **race outcomes** (who finished on the podium) to *describe* the data. They are
+> not model features and nothing here feeds the prediction model, so the "known before lights-out" cutoff that
+> governs features does **not** apply to them. They are also not used to select or tune anything.
+
+### 8.1 Q1: which circuits convert a front-row start into a podium most often, and does the ranking change?
+
+**Grain.** `results_clean` (section 6): one row per `(raceId, driverId)`, joined to `races` (year, round,
+circuitId), to `circuits` (name), and **left-joined** to `qualifying` on `(raceId, driverId)` for the qualifying
+position. Every join is checked: the keys must be unique, and the row count must be unchanged after each join.
+
+**The answer is in 8.7.**
+
+**Definitions**
+- **Podium:** `positionOrder <= 3`.
+- **Front row by grid:** `grid` in {1, 2}. `grid = 0` is never front row.
+- **Front row by qualifying:** qualifying position in {1, 2}. A missing qualifying position is never front row.
+- **Qualifying position and grid are different things:** penalties, pit-lane starts and others' penalties move cars.
+  Both are reported, and 8.5 compares them directly.
+- **Conversion rate:** podiums ÷ front-row starts, with a Wilson 95% interval.
+- **Windows:** primary = 2003–2024 (complete qualifying data, both definitions). Secondary = grid-based, all years.
+- **Eras:** ≤2013 vs ≥2014. **Minimum:** 10 front-row starts per circuit-era (`config.MIN_FRONT_ROW_STARTS`)."""),
+    code("""fr = de.build_front_row_table(results_clean, races, tables["circuits"], qualifying)
+
+# The grain checks are also enforced inside build_front_row_table; repeated here so they are visible.
+assert len(fr) == len(results_clean), "a join changed the row count"
+assert not fr.duplicated(["raceId", "driverId"]).any(), "(raceId, driverId) is not unique"
+assert not qualifying.duplicated(["raceId", "driverId"]).any(), "qualifying is not unique on (raceId, driverId)"
+assert fr["grid"].notna().all()
+assert not fr.loc[fr["grid"] == 0, "front_row_grid"].any(), "grid = 0 must never be front row"
+
+print(f"rows: results_clean {len(results_clean)} -> joined table {len(fr)}")
+print(f"qualifying rows: {len(qualifying)}, unique on (raceId, driverId): "
+      f"{not qualifying.duplicated(['raceId', 'driverId']).any()}")
+
+limit_rows = []
+for definition, flag in [("grid", "front_row_grid"), ("quali", "front_row_quali")]:
+    bad = de.races_over_front_row_limit(fr, flag)
+    in_primary = bad["year"].between(*config.DE_WINDOW)
+    assert not in_primary.any(), "a primary-window race has more than 2 front-row rows"
+    limit_rows.append({
+        "definition": definition,
+        "races with > 2 front-row rows (all years)": len(bad),
+        "of which in 2003-2024": int(in_primary.sum()),
+        "years": ", ".join(map(str, sorted(bad["year"].unique()))) or "-",
+    })
+display(pd.DataFrame(limit_rows).set_index("definition"))"""),
+    md("""A front row holds two cars, so more than two front-row rows in a race signals a data quirk. By **qualifying**
+there are none. By **grid** there are 8 races, all between 1951 and 1964: the same car's grid slot appears on two
+drivers' rows (shared drives, see 6.3). None are in the primary window. They only affect the secondary all-years
+window, where they add a few extra "front-row" starts."""),
+
+    md("""### 8.2 Missingness: qualifying-position coverage, 2003–2024
+
+**Question:** in the primary window, how many rows have no qualifying position? Those rows can never count as a front
+row by qualifying, so this bounds how complete the qualifying-based answer is."""),
+    code("""cov = de.quali_coverage_by_season(fr)
+missing_rows = int((cov["n_rows"] - cov["n_with_quali"]).sum())
+print(f"2003-2024: {int(cov['n_rows'].sum())} rows, {missing_rows} without a qualifying position "
+      f"({missing_rows / cov['n_rows'].sum():.2%}); lowest season: {int(cov['coverage'].idxmin())} "
+      f"({cov['coverage'].min():.2%})")
+
+fig, ax = plots.new_figure(height=3.6)
+plots.style_axes(ax, "Share of rows with a qualifying position, by season (axis starts at 97%)",
+                 ylabel="rows with qualifying position", percent=True)
+plots.plot_lines(ax, cov[["coverage"]], marker=True)
+ax.set_ylim(0.97, 1.0)
+ax.set_xticks(range(config.DE_WINDOW[0], config.DE_WINDOW[1] + 1, 3))
+fig.tight_layout()
+plt.show()
+
+display(cov.loc[cov["n_with_quali"] < cov["n_rows"]])"""),
+    md("""**What it shows (missingness).**
+- **Qualifying position is almost complete in the primary window:** 23 of 8,961 rows (0.26%) have none. 2003–2010 are
+  complete; the lowest season is 2016 (98.92%). Eight seasons have any gap (table above).
+- **It does not affect the grid-based answer.** All 854 grid front-row starts in 2003–2024 have a qualifying position
+  (see the 2 × 2 table in 8.6), so none of the 23 rows is a grid front-row start. For the qualifying-based answer, a
+  missing position can only mean "not counted as front row".
+- **`grid` itself is never missing**, and neither are year, round or circuit after the joins (asserted)."""),
+
+    md("""### 8.3 Conversion per circuit and era; effect of the minimum-starts rule
+
+The tables below hold **every circuit × era × definition** (columns `rate`, `ci_low`, `ci_high`, `meets_min`).
+Circuits below the minimum are not ranked, because a rate from a handful of starts is mostly noise. The second table
+shows what each threshold drops (10 is the configured value; 5 and 20 show how sensitive that choice is)."""),
+    code("""conv = de.conversion_tables(fr)
+assert conv.groupby(["window", "definition", "era", "circuitId"]).size().max() == 1, "duplicate circuit-era rows"
+assert (conv["n_podium"] <= conv["n_front_row"]).all()
+
+print("circuit-era cells (all, then those meeting the minimum):")
+display(
+    conv.groupby(["window", "definition", "era"], sort=False)
+    .agg(circuits=("circuitId", "size"), meeting_min=("meets_min", "sum"),
+         front_row_starts=("n_front_row", "sum"), podiums=("n_podium", "sum"))
+    .assign(rate=lambda d: d["podiums"] / d["front_row_starts"])
+)
+
+print("circuits dropped by each minimum-starts threshold:")
+thr = de.threshold_report(conv, (5, config.MIN_FRONT_ROW_STARTS, 20))
+display(
+    thr.set_index(["window", "definition", "era", "min_starts"])
+    [["circuits_with_starts", "circuits_dropped", "circuits_kept", "starts_in_dropped"]]
+)"""),
+    md("""**What it shows.**
+- **At the configured minimum (10 front-row starts, i.e. 5 races), 21 of 27 circuits are kept in ≤2013 and 19 of 32 in
+  ≥2014.** That drops 6 circuits (32 of 400 starts, 8%) and 13 circuits (75 of 454 starts, 17%). The qualifying-based
+  table is the same for ≤2013 and drops 13 circuits (76 starts) for ≥2014.
+- **≥2014 loses more circuits because many appear only a few times** (e.g. Sepang 7 starts, Hockenheimring 8,
+  Istanbul Park 4, Nürburgring 2). Dropping them removes few starts, so the rates are still based on most of the data.
+- **The threshold is a real choice.** At 5 starts only 3 and 5 circuits drop; at 20 (10 races) just 10–11 circuits are kept
+  per era. The tables above let you see the rest.
+- **All-years window:** 24 of 69 circuits (98 of 1,781 starts) drop in ≤2013, circuits with few front-row starts in the old data."""),
+
+    md("""### 8.4 Top circuits per era (primary window, both definitions)
+
+**Question:** which circuits convert front-row starts into podiums most often, and do the grid-based and
+qualifying-based answers agree? Circuits are ranked by their **grid-based** rate within each era (only circuits meeting
+the minimum); the qualifying-based rate is drawn next to it for the same circuits. Dots are rates, bars are Wilson
+95% intervals."""),
+    code("""TOP_N = 10
+primary = conv[conv["window"] == de.WINDOW_PRIMARY]
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5.6), facecolor=plots.SURFACE, sharex=True)
+top_tables = {}
+for ax, era in zip(axes, de.ERAS):
+    g = primary[(primary["era"] == era) & primary["meets_min"]]
+    by_def = {d: g[g["definition"] == d].set_index("circuit") for d in ("grid", "quali")}
+    assert all(t.index.is_unique for t in by_def.values()), "circuit names are not unique"
+    top = by_def["grid"].sort_values("rate", ascending=False).head(TOP_N).index.tolist()
+    ax.set_facecolor(plots.SURFACE)
+    plots.rate_dot_plot(ax, top, {"grid front row": by_def["grid"], "quali front row": by_def["quali"]})
+    plots.style_axes(ax, f"{era}: top {TOP_N} by grid rate",
+                     xlabel="podium rate from a front-row start")
+    grid_top = by_def["grid"].loc[top]  # rank order; the explicit index below keeps the columns aligned
+    quali_top = by_def["quali"].reindex(top)
+    top_tables[era] = pd.DataFrame({
+        "grid: podiums/starts": grid_top["n_podium"].astype(str) + "/" + grid_top["n_front_row"].astype(str),
+        "grid: rate": grid_top["rate"],
+        "grid: 95% interval": grid_top["ci_low"].map("{:.0%}".format) + " - " + grid_top["ci_high"].map("{:.0%}".format),
+        "quali: podiums/starts": quali_top["n_podium"].astype("Int64").astype(str) + "/"
+                                 + quali_top["n_front_row"].astype("Int64").astype(str),
+        "quali: rate": quali_top["rate"],
+    }, index=top)
+fig.tight_layout()
+plt.show()
+
+for era in de.ERAS:
+    print(f"{era}: top {TOP_N} by grid-based rate")
+    display(top_tables[era].style.format({"grid: rate": "{:.0%}", "quali: rate": "{:.0%}"}))
+
+# How much of the within-era ordering is resolved by the data? Pairs of circuits (meeting the minimum)
+# whose 95% intervals do not overlap.
+sep_rows = []
+for era in de.ERAS:
+    for definition in ("grid", "quali"):
+        g = primary[(primary["era"] == era) & (primary["definition"] == definition) & primary["meets_min"]]
+        n_pairs, n_separated = de.ci_separated_pairs(g["ci_low"], g["ci_high"])
+        sep_rows.append({"era": era, "definition": definition, "circuits": len(g), "pairs": n_pairs,
+                         "pairs_with_non_overlapping_ci": n_separated, "share": n_separated / n_pairs})
+print("circuit pairs whose 95% intervals do not overlap:")
+display(pd.DataFrame(sep_rows).set_index(["era", "definition"]).round(3))"""),
+    md("""**What it shows.**
+- **Highest conversion by grid (podiums / front-row starts).** ≤2013: Magny-Cours 11/12 (92%), Istanbul Park 11/14 (79%),
+  Monaco 17/22 and Monza 17/22 (77%), Silverstone 16/22 (73%). ≥2014: Suzuka 16/18 (89%), Yas Marina 19/22 (86%),
+  Monaco 17/20 (85%), Barcelona 18/22 and Spa 18/22 (82%). Monaco is in the top three in both eras.
+- **Grid-based and qualifying-based rates mostly sit on top of each other.** Among the plotted circuits the biggest gaps are Monaco ≤2013
+  (77% vs 68%) and Interlagos ≥2014 (79% vs 65%): cars that qualified on the front row but started further back
+  (8.6).
+- **The ordering within an era is not statistically resolved.** The intervals are about ±10–20 points wide. In every era
+  and definition the highest lower bound (65–67%) is below the lowest upper bound (75–77%), so **no pair of circuits has
+  non-overlapping 95% intervals** (0 of 171–210 pairs). The top-10 lists describe the point estimates. Overlapping
+  intervals mean the circuits are *not distinguishable at this sample size*; they do not show that there is *no difference*.
+
+**Overall (primary window, grid-based):** 68.0% of front-row starts became podiums in ≤2013 (272/400, 95% interval
+63.3%–72.4%) and 76.0% in ≥2014 (345/454, 71.9%–79.7%). By qualifying: 67.2% (269/400) and 73.7% (336/456).
+The difference between eras is tested in 8.5."""),
+
+    md("""### 8.5 Does the ranking change between eras?
+
+**Question:** are the circuits that convert best in ≤2013 also the ones that convert best in ≥2014?
+Each point is a circuit that meets the minimum in **both** eras; the dashed line is y = x (the axes are zoomed to the
+data, and are the same on both). The table gives the
+Spearman rank correlation of the circuit rates between eras, for circuits present in both eras, with and without the
+minimum-starts rule."""),
+    md("""**First, the overall level.** All front-row starts in 2003–2024, ≤2013 vs ≥2014, for both definitions: the
+difference (new − old), a Newcombe 95% interval and a two-sided two-proportion z-test. Each start is treated as an
+independent trial; starts from the same race (pole and P2) and the same circuit are correlated, so the interval is
+somewhat too narrow and the p-value somewhat too small."""),
+    code("""era_diff = de.overall_era_difference(fr)
+level_rows = []
+for r in era_diff.itertuples():
+    level_rows.append({
+        "definition": r.definition,
+        "≤2013 podiums/starts": f"{r.podiums_old}/{r.starts_old}",
+        "≤2013 rate": f"{r.rate_old:.1%}",
+        "≥2014 podiums/starts": f"{r.podiums_new}/{r.starts_new}",
+        "≥2014 rate": f"{r.rate_new:.1%}",
+        "difference (pct points)": f"{100 * r.diff:+.1f}",
+        "95% interval": f"{100 * r.ci_low:+.1f} to {100 * r.ci_high:+.1f}",
+        "z": round(r.z, 2),
+        "p (two-sided)": f"{r.p_value:.4f}",
+    })
+display(pd.DataFrame(level_rows).set_index("definition"))"""),
+    md("""**Then the ranking.** Spearman rank correlation of the circuit rates between eras (circuits present in both eras),
+with an approximate 95% interval; the scatter shows the same circuits against the y = x line."""),
+    code("""rank_corr = de.era_rank_correlation(conv)
+display(rank_corr.set_index(["window", "definition"]).round(2))
+
+above_rows = []
+fig, axes = plt.subplots(1, 3, figsize=(14, 4.9), facecolor=plots.SURFACE)
+for ax, (window, definition) in zip(axes, [(de.WINDOW_PRIMARY, "grid"), (de.WINDOW_PRIMARY, "quali"),
+                                          (de.WINDOW_ALL, "grid")]):
+    g = conv[(conv["window"] == window) & (conv["definition"] == definition) & conv["meets_min"]]
+    wide = g.pivot(index="circuit", columns="era", values="rate").reindex(columns=list(de.ERAS)).dropna()
+    ax.set_facecolor(plots.SURFACE)
+    plots.identity_scatter(ax, wide[de.ERA_OLD], wide[de.ERA_NEW])
+    above_rows.append({
+        "window": window, "definition": definition, "circuits": len(wide),
+        "above_diagonal (higher in >=2014)": int((wide[de.ERA_NEW] > wide[de.ERA_OLD]).sum()),
+        "median change (pct points)": round(100 * float((wide[de.ERA_NEW] - wide[de.ERA_OLD]).median()), 1),
+    })
+    plots.style_axes(ax, f"{window}, {definition}-based ({len(wide)} circuits)",
+                     xlabel=f"podium rate, {de.ERA_OLD}", ylabel=f"podium rate, {de.ERA_NEW}")
+fig.tight_layout()
+plt.show()
+
+display(pd.DataFrame(above_rows).set_index(["window", "definition"]))"""),
+    md("""**What it shows.**
+- **The overall level rose, and the rise is unlikely to be chance.** By grid: 68.0% → 76.0%, +8.0 points (95% interval
+  +2.0 to +14.0; z = 2.60, p = 0.009). By qualifying: 67.2% → 73.7%, +6.4 points (+0.3 to +12.5; z = 2.06, p = 0.039).
+  The qualifying interval only just excludes zero. Both treat starts as independent, so the true uncertainty is somewhat
+  larger than shown.
+- **Most of the change is a level shift, not a reshuffle.** 11 of 14 circuits lie above the y = x line by grid (10 of 14 by
+  qualifying), with a median rise of about 13 (grid) and 11 (qualifying) percentage points, in line with the overall
+  68% → 76%. Reliability improved over the same period (7.6).
+- **Rank agreement between eras is weak but uncertain.** Spearman ρ for the 14 circuits that meet the minimum in both eras
+  is 0.30 by grid (approximate 95% interval −0.28 to 0.72) and 0.57 by qualifying (0.01 to 0.86). Using all 21
+  circuits present in both eras: 0.14 and 0.26. Over all years, grid-based: −0.03 (16 circuits, −0.52 to 0.47).
+- **How to read this:** the ranking is **not reproduced** from one era to the other. But with per-circuit uncertainty
+  this large (8.4: no pair separable), a low correlation is expected even if the true circuit effects were stable, so
+  the data cannot tell a real change in the ranking from noise. The higher qualifying-based value is within that noise."""),
+
+    md("""### 8.6 Qualifying front row vs grid front row, 2003–2024
+
+**Question:** how often does the front row by qualifying differ from the front row by grid, and do those cars convert
+differently? Only rows with a qualifying position are included. The second table is the plain 2 × 2 count."""),
+    code("""cells = de.grid_vs_quali_cells(fr)
+with_q = fr[fr["year"].between(*config.DE_WINDOW) & fr["quali_position"].notna()]
+assert cells["n"].sum() == len(with_q), "cells do not add up to the rows with qualifying"
+
+display(
+    pd.crosstab(with_q["front_row_quali"].rename("front row by quali"),
+                with_q["front_row_grid"].rename("front row by grid"), margins=True)
+)
+display(
+    cells.assign(rate=lambda d: d["rate"].round(3), ci_low=lambda d: d["ci_low"].round(3),
+                 ci_high=lambda d: d["ci_high"].round(3))
+    .sort_values("n", ascending=False).set_index("cell")
+)"""),
+    md("""**What it shows.**
+- **The two definitions rarely disagree.** Of the 856 qualifying front-row rows, 38 (4.4%) did not start on the front
+  row: 36 started P3 or lower and 2 had `grid = 0` (pit lane). 36 cars started on the front row without qualifying there
+  (4.2% of the 854 grid front-row starts).
+- **The grid tracks the outcome better than qualifying.** Front row by both: 72.6% podium (594/818; 95% interval
+  69.5%–75.6%). Qualified front row but started P3 or lower: 30.6% (11/36; 18.0%–46.9%), less than half, with a
+  non-overlapping interval. Moved up to the front row on the grid: 63.9% (23/36; 47.6%–77.5%), compatible with the
+  72.6%. The two pit-lane starts did not convert (0/2; too few to say anything). All other starts: 8.2% (656/8,046).
+- **Why the circuit rates barely differ by definition:** only about 4% of front-row starts change, so most circuits'
+  grid-based and qualifying-based rates move together (8.4).
+
+*(This describes the data. Which of the two to use as a model feature is a feature-design decision, not made here.)*"""),
+
+    md("""### 8.7 Answer to Q1
+
+**Which circuits convert a front-row start into a podium most often?**
+- **Overall (2003–2024, grid-based): 68.0% (272/400) in ≤2013 and 76.0% (345/454) in ≥2014.**
+- **Highest point estimates by grid (podiums / front-row starts):** ≤2013: Magny-Cours 11/12 (92%), Istanbul Park 11/14
+  (79%), Monaco 17/22 and Monza 17/22 (77%), Silverstone 16/22 (73%). ≥2014: Suzuka 16/18 (89%), Yas Marina 19/22
+  (86%), Monaco 17/20 (85%), Barcelona 18/22 and Spa 18/22 (82%).
+- **These orderings are not distinguishable at this sample size.** No two circuits have non-overlapping 95% intervals
+  within an era (10–22 front-row starts each). That is not the same as "no difference".
+
+**Does it change from ≤2013 to ≥2014?**
+- **The overall level rose:** +8.0 points by grid (95% interval +2.0 to +14.0, p = 0.009) and +6.4 by qualifying
+  (+0.3 to +12.5, p = 0.039). 11 of 14 circuits are higher in ≥2014 by grid.
+- **The order is only weakly reproduced:** Spearman 0.30 by grid and 0.57 by qualifying (14 circuits), with wide
+  intervals. The data **cannot separate a real change in the ranking from noise.**
+
+**Qualifying position vs grid.** They differ for about 4% of front-row starts. Cars that qualified on the front row but
+started P3 or lower converted 31% (11/36), against 73% (594/818) for cars on the front row by both, so the grid is what
+tracks the result. The definitions give nearly the same circuit rates because so few rows change.
+
+**Grain and missingness.** One row per `(raceId, driverId)` of the cleaned results (24,761 rows); joins to races, circuits
+and (left) qualifying were checked for unique keys and unchanged row counts. 23 of 8,961 rows in 2003–2024 (0.26%)
+have no qualifying position; none is a grid front-row start.
+
+**Limitations**
+- **`circuitId` pools layout changes.** A circuit is one `circuitId` even when the track changed, for example Yas Marina
+  (modified for 2021) and Barcelona-Catalunya (final chicane removed for 2023). The rate for such a circuit mixes layouts,
+  so it describes the venue, not one specific track. *(Layout history is outside knowledge, not in the dataset.)*
+- **Overlapping intervals mean "not distinguishable at this n", not "no difference".** With 10–22 starts per circuit, only
+  large differences could show up.
+- **The tests and intervals treat starts as independent.** Starts from the same race (pole and P2) are correlated, so
+  the reported uncertainty is somewhat too small.
+- **Eras are a coarse split.** Cars, rules and circuit layouts changed within each era.
+- **The secondary all-years window** includes 8 races (1951–1964) where shared drives put more than two cars on the grid's
+  front row; it is shown for context only.
+- **Descriptive analysis of race outcomes.** Not a model feature, so the prediction cutoff does not apply.""")
+
 ]
 
 nb = new_notebook(cells=cells)

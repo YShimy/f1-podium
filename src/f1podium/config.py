@@ -49,6 +49,11 @@ TEST_START_YEAR = 2022
 
 RANDOM_SEED = 42
 
+# Data-engineering questions (descriptive analyses of race outcomes; not model features).
+DE_WINDOW = (2003, 2024)          # primary window: seasons with near-complete qualifying data
+DE_ERA_SPLIT_YEAR = 2014          # eras: <= 2013 vs >= 2014
+MIN_FRONT_ROW_STARTS = 10         # minimum front-row starts per circuit-era to report a rate
+
 # Missing-value sentinel used throughout the Ergast CSVs.
 NA_VALUES = ["\\N"]
 

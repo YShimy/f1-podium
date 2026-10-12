@@ -245,15 +245,17 @@ def clean_results(
             reason=lambda d: "duplicate pair: kept resultId " + d["kept_resultId"].astype(str),
         )
     )
-    # Skip empty parts: concatenating empty frames triggers a pandas FutureWarning about dtypes.
-    parts = [part.reindex(columns=CLEAN_LOG_COLUMNS) for part in (d2, d3, d1) if len(part)]
-    log = pd.concat(
-        parts or [pd.DataFrame(columns=CLEAN_LOG_COLUMNS)], ignore_index=True
-    ).astype({
+    # Give every part the final dtypes *before* concatenating: all-NA columns (e.g. the D1-only
+    # columns on D2/D3 rows) otherwise trigger a pandas FutureWarning about dtype inference.
+    log_dtypes = {
         "step": "string", "resultId": "Int64", "raceId": "Int64", "driverId": "Int64", "year": "Int64",
         "reason": "string", "resolving_step": "string", "kept_resultId": "Int64",
         "lowest_grid_differs_from_lowest_resultId": "boolean",
-    })
+    }
+    parts = [part.reindex(columns=CLEAN_LOG_COLUMNS).astype(log_dtypes) for part in (d2, d3, d1) if len(part)]
+    log = pd.concat(
+        parts or [pd.DataFrame(columns=CLEAN_LOG_COLUMNS).astype(log_dtypes)], ignore_index=True
+    )
 
     if log["resultId"].duplicated().any():
         raise AssertionError("a results row was removed by more than one step")
