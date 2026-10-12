@@ -11,24 +11,35 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _find_raw_dir() -> Path:
-    """Locate the raw CSV folder.
+KAGGLE_INPUT = Path("/kaggle/input")
 
-    Order: F1_DATA_DIR env var -> Kaggle input dataset -> data/raw in the repo.
+
+def find_raw_dir(kaggle_input: Path = KAGGLE_INPUT, default: Path | None = None) -> Path:
+    """Locate the folder holding the raw CSVs.
+
+    Order:
+      1. F1_DATA_DIR environment variable (explicit override).
+      2. If the Kaggle input folder exists: the first folder under it that contains
+         races.csv (sorted, so the choice is deterministic). Raises if there is none,
+         so a missing dataset fails here with a clear message.
+      3. Otherwise data/raw in the repo.
     """
     env_dir = os.environ.get("F1_DATA_DIR")
     if env_dir:
         return Path(env_dir)
 
-    kaggle_input = Path("/kaggle/input")
     if kaggle_input.exists():
         for races_csv in sorted(kaggle_input.rglob("races.csv")):
             return races_csv.parent
+        raise FileNotFoundError(
+            f"{kaggle_input} exists but no races.csv was found under it. "
+            "Add the Formula 1 dataset to this notebook's inputs."
+        )
 
-    return PROJECT_ROOT / "data" / "raw"
+    return default if default is not None else PROJECT_ROOT / "data" / "raw"
 
 
-RAW_DIR = _find_raw_dir()
+RAW_DIR = find_raw_dir()
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 
 # Chronological split by races.year.

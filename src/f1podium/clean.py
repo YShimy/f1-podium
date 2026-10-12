@@ -245,8 +245,10 @@ def clean_results(
             reason=lambda d: "duplicate pair: kept resultId " + d["kept_resultId"].astype(str),
         )
     )
+    # Skip empty parts: concatenating empty frames triggers a pandas FutureWarning about dtypes.
+    parts = [part.reindex(columns=CLEAN_LOG_COLUMNS) for part in (d2, d3, d1) if len(part)]
     log = pd.concat(
-        [part.reindex(columns=CLEAN_LOG_COLUMNS) for part in (d2, d3, d1)], ignore_index=True
+        parts or [pd.DataFrame(columns=CLEAN_LOG_COLUMNS)], ignore_index=True
     ).astype({
         "step": "string", "resultId": "Int64", "raceId": "Int64", "driverId": "Int64", "year": "Int64",
         "reason": "string", "resolving_step": "string", "kept_resultId": "Int64",
