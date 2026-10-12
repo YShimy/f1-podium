@@ -71,6 +71,8 @@ from f1podium.clean import (
     WITHDREW_STATUS,
     clean_results,
 )
+from f1podium import plots
+from f1podium.eda import rate_by, with_podium
 from f1podium.load import load_all
 from f1podium.validate import (
     find_duplicates,
@@ -865,6 +867,272 @@ display(by_status_era)"""),
   formation lap, so they were not known at our cutoff. *Excluded* and *Disqualified* with no laps may also be
   qualifying-related decisions. *Unknown:* which rows fall into which group; the dataset has no column that says.
 - **Scale.** 56 rows out of 24,761, all with a non-podium label. Any change to D3 for them would be a new decision."""),
+
+    md("""## 7. Post-cleaning EDA
+
+How does the cleaned table (`results_clean`, section 6) differ from raw `results`, and what does the cleaned data say
+about the decisions that are still open (training window, missing-qualifying strategy, `grid = 0` as a feature)?
+**Descriptive only:** nothing here changes the data or decides anything.
+
+**Definitions used in this section**
+- **Podium:** `positionOrder <= 3` (the project target). It is used here only to describe the data.
+- **Non-finish:** status is neither *Finished* nor *+N Lap(s)*. *(Assumption: a car classified laps down finished the race.
+  This is a reliability measure, not part of the target.)*
+- **Starters per race:** cleaned rows per race. This includes the 61 *Withdrew* rows with `grid > 0` that D3 keeps by design.
+- **Qualifying position:** `qualifying.position`, joined one-to-one on `(raceId, driverId)`. It is missing when there is no
+  qualifying row or the position is null.
+- **Era:** *before 2003* vs *2003+*. 2003 is the first season with complete qualifying data (4.3)."""),
+    code("""raw_y = with_podium(with_year(results))
+clean_y = with_podium(with_year(results_clean))
+
+finish_status = tables["status"]["status"].str.fullmatch("Finished|[+][0-9]+ Laps?")
+finish_ids = tables["status"].loc[finish_status, "statusId"]
+clean_y["non_finish"] = ~clean_y["statusId"].isin(finish_ids)
+clean_y["era"] = np.where(clean_y["year"] < 2003, "before 2003", "2003+")
+
+clean_q = clean_y.merge(
+    qualifying[["raceId", "driverId", "position", "q1"]].rename(columns={"position": "quali_position"}),
+    on=["raceId", "driverId"], how="left", validate="one_to_one",
+)
+assert len(clean_q) == len(clean_y), "qualifying join changed the row count"
+
+print(f"finish-like statuses: {int(finish_status.sum())} (Finished, +1 Lap, +2 Laps, ...)")
+print(f"rows: raw {len(raw_y)}, cleaned {len(clean_y)}")"""),
+
+    md("""### 7.1 Rows per season, raw vs cleaned
+
+**Question:** in which seasons did cleaning remove rows, and how many?"""),
+    code("""rows_per_season = pd.DataFrame({
+    "cleaned": clean_y.groupby("year").size(),
+    "raw": raw_y.groupby("year").size(),
+}).fillna(0).astype(int)
+rows_per_season["removed"] = rows_per_season["raw"] - rows_per_season["cleaned"]
+
+fig, ax = plots.new_figure()
+plots.style_axes(ax, "Results rows per season, raw vs cleaned", ylabel="rows")
+plots.plot_lines(ax, rows_per_season[["cleaned", "raw"]])
+plots.mark_splits(ax, config.TRAIN_END_YEAR, config.TEST_START_YEAR)
+fig.tight_layout()
+plt.show()
+
+print("removed in total:", int(rows_per_season["removed"].sum()))
+print("seasons with most rows removed:")
+display(rows_per_season.sort_values("removed", ascending=False).head(6))"""),
+    md("""**What it shows.** Cleaning removed 1,998 rows, and almost all of them come from before the mid-1990s.
+- **Prequalifying era (D3).** The largest gaps are 1989 (620 → 418, −202), 1990 (−124) and 1991 (−123), followed by
+  1981, 1978 and 1988. These are the years when many more cars entered than were allowed to start.
+- **1950s (D2 and D1).** The raw line sits above the cleaned one throughout the decade. That is the Indianapolis 500
+  and the shared drives.
+- **Modern seasons are barely touched.** Only 9 rows were removed from 2003 onwards: none in validation (2020–21)
+  and 2 in test (both D3 non-starters).
+
+**Supports:** the impact of D1–D3. The cleaning decisions mainly change pre-1995 data, so how much they matter for the model
+depends on the **training window**, which is still open. Validation and test are essentially unaffected."""),
+
+    md("""### 7.2 Podium base rate per season, raw vs cleaned
+
+**Question:** did cleaning change the class balance (podium rows ÷ rows), and does the base rate drift over time?"""),
+    code("""podium_rate = pd.DataFrame({
+    "cleaned": rate_by(clean_y, "year", "podium")["rate"],
+    "raw": rate_by(raw_y, "year", "podium")["rate"],
+})
+
+fig, ax = plots.new_figure()
+plots.style_axes(ax, "Podium base rate per season (podium rows / rows)", ylabel="podium rate", percent=True)
+plots.plot_lines(ax, podium_rate)
+plots.mark_splits(ax, config.TRAIN_END_YEAR, config.TEST_START_YEAR)
+ax.set_ylim(0, None)
+fig.tight_layout()
+plt.show()
+
+print(f"overall podium rate: raw {raw_y['podium'].mean():.2%}, cleaned {clean_y['podium'].mean():.2%}")
+print(f"cleaned, before 2003: {clean_y.loc[clean_y['era'] == 'before 2003', 'podium'].mean():.2%} | "
+      f"2003+: {clean_y.loc[clean_y['era'] == '2003+', 'podium'].mean():.2%}")
+print("cleaned podium rate, lowest and highest seasons:")
+display(podium_rate["cleaned"].sort_values().iloc[[0, 1, 2, -3, -2, -1]].to_frame("cleaned rate").style.format("{:.1%}"))"""),
+    md("""**What it shows.**
+- **Cleaning raised the base rate.** Overall it goes from 12.69% raw to 13.50% cleaned. The difference is largest in
+  1988–1992, where raw drops to about 8% because non-starters inflate the number of rows. Once they are removed, the
+  cleaned rate stays at about 11.5% even then.
+- **The base rate follows field size.** There are 3 podiums per race, so the rate is roughly 3 ÷ the number of starters.
+  - The lowest cleaned seasons are 1988–1990 (about 11.5%), which had large fields.
+  - The highest are 1969 (18.6%), 1955 and 1966, which had small fields.
+  - 2017–2024 sit at exactly 15% because every race had 20 cars.
+- **By era:** 13.0% before 2003 and 14.3% from 2003.
+
+**Supports:** D3, since a podium rate computed with non-starters in the denominator would be misleading. It also shows
+that the class balance is about 13–15% positive, which matters later for the choice of evaluation metric. The drift
+with field size is evidence for the **training window / era** decision."""),
+
+    md("""### 7.3 Starters per race, by season (cleaned)
+
+**Question:** how many cars line up per race, and how much does that vary within and between seasons?"""),
+    code("""per_race = clean_y.groupby(["year", "raceId"]).size()
+field = per_race.groupby("year").agg(["mean", "min", "max"])
+x = field.index.to_numpy(dtype=float)
+
+fig, ax = plots.new_figure()
+plots.style_axes(ax, "Starters per race: season mean (line) and min-max across races (band)", ylabel="starters")
+ax.fill_between(x, field["min"], field["max"], color=plots.SERIES[0], alpha=0.18, linewidth=0, zorder=2)
+ax.plot(x, field["mean"], color=plots.SERIES[0], linewidth=2, zorder=3)
+plots.mark_splits(ax, config.TRAIN_END_YEAR, config.TEST_START_YEAR)
+ax.set_ylim(0, None)
+fig.tight_layout()
+plt.show()
+
+display(field.loc[[1950, 1953, 1960, 1970, 1980, 1989, 1995, 2003, 2010, 2024]].round(1))
+print("seasons with exactly 20 starters in every race:",
+      [int(y) for y in field.index if field.loc[y, "min"] == field.loc[y, "max"] == 20])"""),
+    md("""**What it shows.**
+- **1950s–60s:** fields are small and vary a lot within a season, from 10 to 34 starters per race.
+- **1970s–1995:** fields grow to 24–27 (1989: 26 in every race).
+- **From 1996:** fields settle at 20–24. Every race has exactly 20 cars in 2003, 2004 and 2017–2021; 2024 has 19–20.
+
+The counts include the 61 *Withdrew* rows with `grid > 0` that D3 keeps.
+
+**Supports:** later feature design, plus the training window. The same grid slot means different things in different
+fields: P10 of 34 is not P10 of 20. If several eras are combined, a relative position such as grid ÷ field size may be
+needed *(Recommendation for the feature step, not decided here)*."""),
+
+    md("""### 7.4 Podium rate by grid position (1–20), before 2003 vs 2003+
+
+**Question:** how strongly does starting position predict a podium, and is that relationship the same in both eras?
+`grid = 0` (meaning still pending) and grid positions above 20 are left out; their counts are printed below."""),
+    code("""on_grid = clean_y[clean_y["grid"].between(1, 20)]
+by_grid = rate_by(on_grid, ["grid", "era"], "podium")
+grid_rate = by_grid["rate"].unstack("era")[["2003+", "before 2003"]]
+
+fig, ax = plots.new_figure()
+plots.style_axes(ax, "Podium rate by grid position", xlabel="grid position", ylabel="podium rate", percent=True)
+plots.plot_lines(ax, grid_rate, marker=True)
+ax.set_xticks(range(1, 21))
+ax.set_ylim(0, 1)
+fig.tight_layout()
+plt.show()
+
+left_out = clean_y.assign(
+    grid_zero=clean_y["grid"].eq(0), grid_over_20=clean_y["grid"].gt(20)
+).groupby("era")[["grid_zero", "grid_over_20"]].sum()
+print("rows left out of this plot:"); display(left_out)
+print("smallest n per (grid, era):", int(by_grid["n"].min()))
+display(grid_rate.loc[[1, 2, 3, 4, 5, 6, 10]].style.format("{:.1%}"))"""),
+    md("""**What it shows.** Grid position is strongly related to finishing on the podium in both eras, but the shape differs.
+- **2003+:** the curve is much steeper. Pole converts 79.4% of the time, P2 65.0% and P3 50.9%.
+- **Before 2003:** pole converts only 54.2% (P2 50.4%, P3 43.1%).
+- **The curves cross at P4.** From P4 to about P10 the older era gives *more* podiums than today (P5: 27.5% vs 20.8%).
+- **Rows left out:** grid 0 (51 before 2003, 77 from 2003) and grid > 20 (2,366 and 412). Each point is based on at
+  least 373 rows.
+
+**Supports:** the **training window / era** decision. A model trained across both eras would learn an average of two
+different curves. It also shows why `grid = 0` needs a decided meaning before it is used as a number: it would otherwise
+read as "better than pole"."""),
+
+    md("""### 7.5 Podium rate by qualifying position (2003+)
+
+**Question:** is qualifying position informative in the seasons where we have it, and how does it relate to grid?"""),
+    code("""q2003 = clean_q[(clean_q["year"] >= 2003) & clean_q["quali_position"].between(1, 20)]
+by_quali = rate_by(q2003, "quali_position", "podium")
+
+fig, ax = plots.new_figure()
+plots.style_axes(ax, "Podium rate by qualifying position, 2003+", xlabel="qualifying position",
+                 ylabel="podium rate", percent=True)
+plots.plot_lines(ax, by_quali[["rate"]], marker=True)
+ax.set_xticks(range(1, 21))
+ax.set_ylim(0, 1)
+fig.tight_layout()
+plt.show()
+
+recent = clean_q[clean_q["year"] >= 2003]
+same = (recent["grid"] == recent["quali_position"]).mean()
+print(f"smallest n per qualifying position: {int(by_quali['n'].min())}")
+print(f"2003+ rows where grid == qualifying position: {same:.1%} (differences: grid penalties, pit-lane starts, missing qualifying)")
+display(by_quali.loc[[1, 2, 3, 4, 5, 6, 10], ["n", "rate"]].style.format({"rate": "{:.1%}"}))"""),
+    md("""**What it shows.**
+- **Qualifying position is about as informative as grid from 2003.** The podium rate is 78.5% from qualifying P1,
+  62.9% from P2, 50.7% from P3, 24.3% from P5 and 4.0% from P10. Each position has at least 412 rows.
+- **But grid and qualifying position are not the same thing.** They agree in only 72.4% of 2003+ rows. The others
+  differ because of grid penalties, pit-lane starts and the occasional missing qualifying row.
+
+**Supports:** the qualifying-feature questions. It is evidence that qualifying data is usable and complete from 2003,
+which bears on the missing-qualifying strategy and a possible 2003 start. Whether to use grid, qualifying position or
+both is a feature decision for later; their 72% agreement suggests they carry overlapping but not identical information."""),
+
+    md("""### 7.6 Non-finish rate per decade (cleaned)
+
+**Question:** did reliability (the share of starters that do not finish) change by era?"""),
+    code("""clean_y["decade"] = (clean_y["year"] // 10 * 10).astype(int)
+by_decade = rate_by(clean_y, "decade", "non_finish")
+
+fig, ax = plots.new_figure(height=3.8)
+plots.style_axes(ax, "Non-finish rate per decade (status not Finished / +N Laps)", ylabel="non-finish rate",
+                 percent=True)
+ax.bar([f"{d}s" for d in by_decade.index], by_decade["rate"], color=plots.SERIES[0], width=0.6, zorder=3)
+ax.set_ylim(0, None)
+fig.tight_layout()
+plt.show()
+
+display(by_decade.style.format({"rate": "{:.1%}"}))"""),
+    md("""**What it shows.**
+- **1950s–1990s:** about half of all starters did not finish (49–50%), with a peak of 56.1% in the 1980s.
+- **Since then reliability has improved sharply:** 32.1% in the 2000s, 19.6% in the 2010s and 14.4% in the 2020s.
+
+This fits 7.4. When half the field retires, a midfield starter has a real chance of a podium, and even pole is far from
+safe.
+
+**Supports:** the **training window**. Older seasons follow different race dynamics, which argues for a later start
+date, an era feature, or at least era-split evaluation. *(Evidence only; the window is not decided here.)*"""),
+
+    md("""### 7.7 Missingness per season: grid, qualifying position, q1 (cleaned)
+
+**Question:** in which seasons are the pre-race fields missing? `grid` is never null (asserted below), so instead of a flat line
+at 0% the chart shows the share of `grid = 0`. `q1 missing` is drawn dashed on top of `qualifying position missing`,
+because the two lines overlap for most seasons. That value is **not** missing, but its meaning differs by era (4.1), so it is worth seeing alongside."""),
+    code("""assert clean_q["grid"].notna().all(), "grid has missing values"
+print("grid missing: 0 rows in every season (asserted), so it is not drawn as a line.")
+
+missing_by_season = clean_q.assign(
+    quali_missing=clean_q["quali_position"].isna(),
+    q1_missing=clean_q["q1"].isna(),
+    grid_zero=clean_q["grid"].eq(0),
+).groupby("year")[["quali_missing", "q1_missing", "grid_zero"]].mean()
+missing_by_season.columns = [
+    "qualifying position missing", "q1 missing", "grid = 0 (not missing; meaning pending)",
+]
+
+fig, ax = plots.new_figure()
+plots.style_axes(ax, "Share of cleaned rows per season: missing qualifying fields and grid = 0",
+                 ylabel="share of rows", percent=True)
+# q1 is drawn dashed over a thicker solid line so the two overlapping series stay visible.
+plots.plot_lines(ax, missing_by_season, linestyles=["-", "--", "-"], linewidths=[3.5, 2, 2])
+plots.mark_splits(ax, config.TRAIN_END_YEAR, config.TEST_START_YEAR)
+ax.set_ylim(0, 1.05)
+fig.tight_layout()
+plt.show()
+
+eras = clean_q.assign(
+    quali_missing=clean_q["quali_position"].isna(), q1_missing=clean_q["q1"].isna(), grid_zero=clean_q["grid"].eq(0)
+)
+display(eras.groupby("era")[["quali_missing", "q1_missing", "grid_zero"]].mean().style.format("{:.1%}"))
+print("2003+ seasons with the most q1 missing:")
+display(missing_by_season.loc[2003:, ["qualifying position missing", "q1 missing"]]
+        .sort_values("q1 missing", ascending=False).head(4).style.format("{:.1%}"))"""),
+    md("""**What it shows.**
+- **`grid` is never missing** (asserted).
+- **Qualifying position** is missing for every row before 1994, for 53.7% of rows in 1994–2002, and for only 0.26% of
+  rows from 2003. Before 2003 overall it is 90.2%.
+- **`q1`** follows the same pattern but is a little less complete from 2003: 1.64% missing, worst in 2004 (5.8%),
+  2005 (4.5%) and 2003 (3.4%). Those seasons used different qualifying formats. Why the time is missing while a
+  position exists is *Unknown*.
+- **`grid = 0`** is rare after cleaning: 0.32% of rows before 2003 and 0.86% from 2003. It drifts upward in the 2020s,
+  in line with more pit-lane starts.
+
+**Supports:**
+- The **missing-qualifying strategy and the training window:** from 2003 the qualifying fields are essentially complete,
+  while before 2003 they are mostly absent.
+- **Feature choice:** qualifying position is more complete than the `q1` time.
+- **The meaning of `grid = 0`:** it is a small but growing modern share.
+
+*(All evidence only; none of these decisions is made here.)*"""),
 ]
 
 nb = new_notebook(cells=cells)
