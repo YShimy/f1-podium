@@ -1,0 +1,47 @@
+nationality,country,note
+American,USA,
+American,United States,circuits.csv spells the Las Vegas Strip (2023-24) 'United States'
+American-Italian,USA,dual nationality: home in both countries
+American-Italian,Italy,dual nationality: home in both countries
+Argentine,Argentina,
+Argentine-Italian,Argentina,dual nationality: home in both countries
+Argentine-Italian,Italy,dual nationality: home in both countries
+Argentinian,Argentina,drivers.csv has a trailing space ('Argentinian '); stripped before mapping
+Australian,Australia,
+Austrian,Austria,
+Belgian,Belgium,
+Brazilian,Brazil,
+British,UK,
+Canadian,Canada,
+Chilean,no circuit,
+Chinese,China,
+Colombian,no circuit,
+Czech,no circuit,
+Danish,no circuit,
+Dutch,Netherlands,
+East German,Germany,ambiguous: German GPs of 1952-53 were in West Germany; mapped to Germany
+Finnish,no circuit,
+French,France,
+German,Germany,
+Hungarian,Hungary,
+Indian,India,
+Indonesian,no circuit,
+Irish,no circuit,Ireland is not the UK; Northern Irish drivers are recorded as British
+Italian,Italy,
+Japanese,Japan,
+Liechtensteiner,no circuit,
+Malaysian,Malaysia,
+Mexican,Mexico,
+Monegasque,Monaco,
+New Zealander,no circuit,
+Polish,no circuit,
+Portuguese,Portugal,
+Rhodesian,no circuit,ambiguous: all races at the South African GP; not treated as home
+Russian,Russia,
+South African,South Africa,
+Spanish,Spain,
+Swedish,Sweden,
+Swiss,Switzerland,
+Thai,no circuit,
+Uruguayan,no circuit,
+Venezuelan,no circuit,

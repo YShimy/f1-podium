@@ -54,6 +54,13 @@ DE_WINDOW = (2003, 2024)          # primary window: seasons with near-complete q
 DE_ERA_SPLIT_YEAR = 2014          # eras: <= 2013 vs >= 2014
 MIN_FRONT_ROW_STARTS = 10         # minimum front-row starts per circuit-era to report a rate
 
+# Q2 (home-country advantage). Grid buckets as (label, first, last); last=None means "and above".
+GRID_BUCKETS = [("1", 1, 1), ("2–3", 2, 3), ("4–6", 4, 6), ("7–10", 7, 10), ("11+", 11, None)]
+GRID_BUCKET_PIT_LANE = "0 (pit lane)"   # grid == 0
+Q2_MIN_HOME_RACES = 1                   # sensitivity (a): drivers with at least this many home races ...
+Q2_MIN_AWAY_RACES = 10                  # ... and at least this many away races
+Q2_RECENT_START_YEAR = 2003             # sensitivity (b): seasons from this year on
+
 # Missing-value sentinel used throughout the Ergast CSVs.
 NA_VALUES = ["\\N"]
 

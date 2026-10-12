@@ -1,10 +1,12 @@
-"""Tests for the data-engineering Q1 helpers (front-row conversion by circuit)."""
+"""Tests for the data-engineering helpers: Q1 (front-row conversion) and Q2 (home advantage)."""
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from f1podium import config
 from f1podium import de_questions as de
+from f1podium.load import load_table
 
 
 def ints(rows, cols):
@@ -184,3 +186,131 @@ def test_overall_era_difference_counts_by_definition():
     out = de.overall_era_difference(df).set_index("definition")
     assert out.loc["grid", ["starts_old", "podiums_old", "starts_new", "podiums_new"]].tolist() == [4, 3, 4, 3]
     assert out.loc["quali", ["starts_old", "starts_new"]].tolist() == [3, 4]
+
+
+# ---------------------------------------------------------------------------
+# Q2: home advantage
+# ---------------------------------------------------------------------------
+
+RAW_PRESENT = all((config.RAW_DIR / f"{t}.csv").exists() for t in ("drivers", "circuits"))
+
+
+@pytest.mark.skipif(not RAW_PRESENT, reason="raw data not available")
+def test_nationality_map_is_complete_for_the_real_data():
+    mapping = de.load_nationality_map()
+    check = de.check_nationality_map(mapping, load_table("drivers"), load_table("circuits"))
+    assert check["unmapped_nationalities"] == []      # every driver nationality maps
+    assert check["unknown_countries"] == []           # every country exists in circuits or is "no circuit"
+    assert check["drivers_without_nationality"] == 0
+
+
+def test_nationality_map_file_is_well_formed():
+    mapping = de.load_nationality_map()
+    assert not mapping.duplicated(["nationality", "country"]).any()
+    assert set(mapping.loc[mapping["nationality"] == "American", "country"]) == {"USA", "United States"}
+    assert set(mapping.loc[mapping["nationality"] == "Irish", "country"]) == {de.NO_CIRCUIT}
+
+
+def test_check_nationality_map_flags_unmapped_and_unknown():
+    mapping = pd.DataFrame({"nationality": ["British", "Martian"], "country": ["UK", "Mars"], "note": ["", ""]})
+    drivers = pd.DataFrame({"nationality": ["British", "Irish "]})
+    circuits = pd.DataFrame({"country": ["UK"]})
+    out = de.check_nationality_map(mapping, drivers, circuits)
+    assert out["unmapped_nationalities"] == ["Irish"]
+    assert out["unknown_countries"] == ["Mars"]
+
+
+@pytest.mark.parametrize("rows, message", [
+    ("nationality,country,note\nBritish,UK,\nBritish,UK,\n", "duplicate"),
+    ("nationality,country,note\nIrish,UK,\nIrish,no circuit,\n", "no circuit"),
+    ("nationality,country\nBritish,UK\n", "columns"),
+])
+def test_load_nationality_map_rejects_bad_files(tmp_path, rows, message):
+    path = tmp_path / "map.csv"
+    path.write_text(rows, encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        de.load_nationality_map(path)
+
+
+@pytest.fixture
+def q2_tables():
+    results = ints(
+        [(1, 1, 1, 1), (2, 1, 5, 4), (3, 1, 2, 2), (3, 2, 3, 3), (3, 4, 0, 9), (1, 3, 7, 8)],
+        ["raceId", "driverId", "grid", "positionOrder"],
+    )
+    races = ints([(1, 2010, 10), (2, 2023, 20), (3, 2015, 30)], ["raceId", "year", "circuitId"])
+    circuits = pd.DataFrame({"circuitId": pd.array([10, 20, 30], dtype="Int64"),
+                             "country": ["USA", "United States", "UK"]})
+    drivers = pd.DataFrame({"driverId": pd.array([1, 2, 3, 4], dtype="Int64"),
+                            "nationality": ["American", "Irish", "Argentinian ", "British"]})
+    mapping = pd.DataFrame({
+        "nationality": ["American", "American", "Irish", "Argentinian", "British"],
+        "country": ["USA", "United States", de.NO_CIRCUIT, "Argentina", "UK"],
+        "note": [""] * 5,
+    })
+    return results, races, circuits, drivers, mapping
+
+
+def test_home_table_keeps_rows_and_flags_home(q2_tables):
+    results = q2_tables[0]
+    h = de.build_home_table(*q2_tables)
+    assert len(h) == len(results)                      # joins (incl. a 2-country nationality) add no rows
+    home = h.set_index(["raceId", "driverId"])["home"]
+    assert home[(1, 1)] and home[(2, 1)]                # American at 'USA' and at 'United States'
+    assert not home[(3, 2)]                             # Irish at a UK circuit: not home
+    assert home[(3, 4)]                                 # British at a UK circuit
+    assert not home[(1, 3)]                             # Argentinian at a US circuit
+    assert (h["nationality"] == "Argentinian").sum() == 1  # trailing space stripped before mapping
+    assert h.set_index(["raceId", "driverId"]).loc[(3, 4), "grid_bucket"] == config.GRID_BUCKET_PIT_LANE
+
+
+@pytest.mark.parametrize("which", ["races", "circuits", "drivers", "mapping"])
+def test_home_table_rejects_duplicate_keys(q2_tables, which):
+    t = dict(zip(["results", "races", "circuits", "drivers", "mapping"], q2_tables))
+    t[which] = pd.concat([t[which], t[which].iloc[[0]]], ignore_index=True)
+    with pytest.raises(AssertionError, match="not unique"):
+        de.build_home_table(t["results"], t["races"], t["circuits"], t["drivers"], t["mapping"])
+
+
+@pytest.mark.parametrize("grid, bucket", [
+    (0, config.GRID_BUCKET_PIT_LANE), (1, "1"), (2, "2–3"), (3, "2–3"), (4, "4–6"),
+    (6, "4–6"), (7, "7–10"), (10, "7–10"), (11, "11+"), (26, "11+"),
+])
+def test_grid_bucket_edges(grid, bucket):
+    assert de.assign_grid_bucket(pd.Series(pd.array([grid], dtype="Int64")))[0] == bucket
+
+
+def test_grid_bucket_missing_and_invalid():
+    out = de.assign_grid_bucket(pd.Series(pd.array([None, 1], dtype="Int64")))
+    assert pd.isna(out[0]) and out[1] == "1"
+    with pytest.raises(ValueError, match="non-negative"):
+        de.assign_grid_bucket(pd.Series(pd.array([-1], dtype="Int64")))
+
+
+def two_by_two(a, b, c, d, bucket):
+    """Rows for one stratum: a home podiums, b home non-podiums, c away podiums, d away non-podiums."""
+    return pd.DataFrame({
+        "home": [True] * (a + b) + [False] * (c + d),
+        "podium": [True] * a + [False] * b + [True] * c + [False] * d,
+        "grid_bucket": bucket,
+    })
+
+
+def test_cmh_odds_ratio_single_stratum():
+    out = de.cmh_home_or(two_by_two(10, 10, 5, 15, "1"))
+    assert out["odds_ratio"] == pytest.approx(3.0)       # (10 * 15) / (10 * 5)
+    assert out["ci_low"] < 3.0 < out["ci_high"]
+    assert np.isnan(out["homogeneity_p"])                # needs two or more strata
+
+
+def test_cmh_identical_strata_and_uninformative_stratum():
+    df = pd.concat([
+        two_by_two(10, 10, 5, 15, "1"),
+        two_by_two(10, 10, 5, 15, "2–3"),
+        two_by_two(0, 4, 0, 30, config.GRID_BUCKET_PIT_LANE),  # no podiums: no information on the OR
+    ], ignore_index=True)
+    out = de.cmh_home_or(df)
+    assert out["odds_ratio"] == pytest.approx(3.0)
+    assert out["homogeneity_p"] == pytest.approx(1.0)
+    assert out["strata_dropped"] == [config.GRID_BUCKET_PIT_LANE]
+    assert out["n_rows"] == 80

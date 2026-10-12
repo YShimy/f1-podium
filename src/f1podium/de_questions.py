@@ -6,9 +6,13 @@ race) does not apply to them.
 
 Q1: which circuits convert a front-row start into a podium most often, and does the
 ranking change between eras? Qualifying position and grid position are kept apart.
+
+Q2: do drivers podium more often at a circuit in their home country than elsewhere,
+controlling for starting position?
 """
 
 from math import erfc, sqrt
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -300,3 +304,224 @@ def grid_vs_quali_cells(df: pd.DataFrame, window: tuple[int, int] = config.DE_WI
     out["rate"] = out["n_podium"] / out["n"]
     out["ci_low"], out["ci_high"] = wilson_interval(out["n_podium"], out["n"])
     return out.reset_index()
+
+
+# ---------------------------------------------------------------------------
+# Q2: do drivers podium more often in their home country, controlling for grid?
+# ---------------------------------------------------------------------------
+
+NO_CIRCUIT = "no circuit"
+NATIONALITY_MAP_PATH = Path(__file__).resolve().parent / "reference" / "nationality_to_country.csv"
+MAP_COLUMNS = ["nationality", "country", "note"]
+
+
+def load_nationality_map(path: Path = NATIONALITY_MAP_PATH) -> pd.DataFrame:
+    """Read the nationality -> circuits.country mapping (one row per pair; a nationality may have several).
+
+    Text is stripped. Raises on wrong columns, empty values, duplicate pairs, or a nationality
+    mapped both to a country and to "no circuit".
+    """
+    m = pd.read_csv(path, dtype=str, keep_default_na=False)
+    if list(m.columns) != MAP_COLUMNS:
+        raise ValueError(f"mapping columns must be {MAP_COLUMNS}, got {list(m.columns)}")
+    for col in ("nationality", "country"):
+        m[col] = m[col].str.strip()
+    if (m[["nationality", "country"]] == "").any().any():
+        raise ValueError("mapping has empty nationality or country values")
+    if m.duplicated(["nationality", "country"]).any():
+        raise ValueError("mapping has duplicate (nationality, country) pairs")
+    no_circuit = m["country"] == NO_CIRCUIT
+    if m.loc[no_circuit, "nationality"].isin(m.loc[~no_circuit, "nationality"]).any():
+        raise ValueError("a nationality is mapped both to a country and to 'no circuit'")
+    return m
+
+
+def check_nationality_map(mapping: pd.DataFrame, drivers: pd.DataFrame, circuits: pd.DataFrame) -> dict:
+    """Completeness of the mapping against the data.
+
+    unmapped_nationalities: driver nationalities (stripped) with no mapping row.
+    unknown_countries: mapped countries that are neither a circuits.country value nor "no circuit".
+    """
+    nationalities = set(drivers["nationality"].dropna().str.strip())
+    valid_countries = set(circuits["country"].dropna()) | {NO_CIRCUIT}
+    return {
+        "unmapped_nationalities": sorted(nationalities - set(mapping["nationality"])),
+        "unknown_countries": sorted(set(mapping["country"]) - valid_countries),
+        "drivers_without_nationality": int(drivers["nationality"].isna().sum()),
+    }
+
+
+def grid_bucket_labels() -> list[str]:
+    return [config.GRID_BUCKET_PIT_LANE] + [label for label, _, _ in config.GRID_BUCKETS]
+
+
+def assign_grid_bucket(grid: pd.Series) -> pd.Series:
+    """Ordered grid bucket per row: 0 -> pit lane, then config.GRID_BUCKETS. Missing grid stays missing."""
+    g = pd.to_numeric(grid)
+    present = g.dropna()
+    if (present < 0).any() or (present != present.round()).any():
+        raise ValueError("grid must be a non-negative whole number")
+    out = pd.Series(pd.NA, index=grid.index, dtype="object")
+    out[g.eq(0).fillna(False).to_numpy(bool)] = config.GRID_BUCKET_PIT_LANE
+    for label, first, last in config.GRID_BUCKETS:
+        in_bucket = g.ge(first) if last is None else (g.ge(first) & g.le(last))
+        out[in_bucket.fillna(False).to_numpy(bool)] = label
+    if out[g.notna().to_numpy(bool)].isna().any():
+        raise ValueError("config.GRID_BUCKETS does not cover every grid value")
+    return pd.Series(pd.Categorical(out, categories=grid_bucket_labels(), ordered=True), index=grid.index)
+
+
+def build_home_table(
+    results_clean: pd.DataFrame,
+    races: pd.DataFrame,
+    circuits: pd.DataFrame,
+    drivers: pd.DataFrame,
+    mapping: pd.DataFrame,
+) -> pd.DataFrame:
+    """One row per (raceId, driverId) with circuit country, driver nationality and a `home` flag.
+
+    Joins: cleaned results -> races (year, circuitId) -> circuits (country) -> drivers (nationality,
+    stripped). `home` is True when (nationality, circuit country) is a pair in the mapping; this is a
+    lookup on unique pairs, so a nationality mapped to several countries never multiplies rows.
+    Raises if a key is not unique or any join changes the row count.
+    """
+    _require_unique(results_clean, KEY, "results_clean")
+    _require_unique(races, ["raceId"], "races")
+    _require_unique(circuits, ["circuitId"], "circuits")
+    _require_unique(drivers, ["driverId"], "drivers")
+    _require_unique(mapping, ["nationality", "country"], "nationality mapping")
+
+    n = len(results_clean)
+    out = results_clean[KEY + ["grid", "positionOrder"]].copy()
+
+    out = out.merge(races[["raceId", "year", "circuitId"]], on="raceId", how="left", validate="many_to_one")
+    _require_rows(out, n, "join to races")
+    out = out.merge(
+        circuits[["circuitId", "country"]].rename(columns={"country": "circuit_country"}),
+        on="circuitId", how="left", validate="many_to_one",
+    )
+    _require_rows(out, n, "join to circuits")
+    out = out.merge(drivers[["driverId", "nationality"]], on="driverId", how="left", validate="many_to_one")
+    _require_rows(out, n, "join to drivers")
+    if out[["year", "circuit_country"]].isna().any().any():
+        raise AssertionError("missing year or circuit country after the joins")
+    out["nationality"] = out["nationality"].str.strip()
+
+    home_pairs = (
+        mapping.loc[mapping["country"] != NO_CIRCUIT, ["nationality", "country"]]
+        .rename(columns={"country": "circuit_country"})
+        .assign(_home=True)
+    )
+    out = out.merge(home_pairs, on=["nationality", "circuit_country"], how="left", validate="many_to_one")
+    _require_rows(out, n, "home lookup")
+
+    out["home"] = out["_home"].notna()
+    out["mapped"] = out["nationality"].isin(mapping["nationality"])
+    out["has_home_circuit"] = out["nationality"].isin(home_pairs["nationality"])
+    out["decade"] = (out["year"] // 10 * 10).astype(int)
+    out["grid_bucket"] = assign_grid_bucket(out["grid"])
+    out["podium"] = out["positionOrder"].le(PODIUM_MAX_POSITION).fillna(False).astype(bool)
+    return out.drop(columns=["_home", "positionOrder"])
+
+
+def bucket_rates(df: pd.DataFrame) -> pd.DataFrame:
+    """Podium rate per grid bucket x home/away, with n, podiums and a Wilson 95% interval."""
+    out = (
+        df.dropna(subset=["grid_bucket"])
+        .assign(side=lambda d: np.where(d["home"], "home", "away"))
+        .groupby(["grid_bucket", "side"], observed=True)["podium"]
+        .agg(n="size", podiums="sum")
+        .reset_index()
+    )
+    out["podiums"] = out["podiums"].astype(int)
+    out["rate"] = out["podiums"] / out["n"]
+    out["ci_low"], out["ci_high"] = wilson_interval(out["podiums"], out["n"])
+    return out
+
+
+def _informative_strata(df: pd.DataFrame, strata: str) -> tuple[pd.DataFrame, list, list]:
+    """Keep strata with home and away rows and both outcomes; the others carry no information on the OR."""
+    used, dropped = [], []
+    for value, g in df.dropna(subset=[strata]).groupby(strata, observed=True):
+        has_both_sides = g["home"].any() and (~g["home"]).any()
+        has_both_outcomes = g["podium"].any() and (~g["podium"]).any()
+        (used if has_both_sides and has_both_outcomes else dropped).append(value)
+    return df[df[strata].isin(used)], used, dropped
+
+
+def cmh_home_or(df: pd.DataFrame, strata: str = "grid_bucket") -> dict:
+    """Mantel-Haenszel odds ratio of a podium at home vs away, pooled over grid buckets.
+
+    Also returns the 95% CI, the p-value for OR = 1 (CMH test) and the Breslow-Day p-value for equal
+    odds ratios across strata. Strata with no home or no away rows, or with no podiums (or only
+    podiums), carry no information on the OR and are dropped; they are listed in the result.
+    Rows are treated as independent (no clustering by driver).
+    """
+    from statsmodels.stats.contingency_tables import StratifiedTable
+
+    sub, used, dropped = _informative_strata(df, strata)
+    tables = []
+    for value in used:
+        g = sub[sub[strata] == value]
+        h, p = g["home"], g["podium"]
+        tables.append(np.array([[(h & p).sum(), (h & ~p).sum()], [(~h & p).sum(), (~h & ~p).sum()]], dtype=float))
+    st = StratifiedTable(tables)
+    low, high = st.oddsratio_pooled_confint(alpha=0.05)
+    return {
+        "odds_ratio": float(st.oddsratio_pooled), "ci_low": float(low), "ci_high": float(high),
+        "p_value": float(st.test_null_odds().pvalue),
+        "homogeneity_p": float(st.test_equal_odds().pvalue) if len(tables) > 1 else np.nan,
+        "n_rows": len(sub), "n_home": int(sub["home"].sum()),
+        "strata_used": [str(v) for v in used], "strata_dropped": [str(v) for v in dropped],
+    }
+
+
+def logit_home_or(df: pd.DataFrame) -> dict:
+    """Odds ratio for `home` from podium ~ home + C(grid_bucket) + C(decade), SEs clustered by driver.
+
+    Grid buckets without both outcomes (the pit-lane bucket has no podiums) cause perfect
+    separation and carry no information on `home`, so they are dropped and listed.
+    """
+    import statsmodels.formula.api as smf
+
+    sub, _, dropped = _informative_strata(df, "grid_bucket")
+    data = pd.DataFrame({
+        "podium": sub["podium"].astype(int).to_numpy(),
+        "home": sub["home"].astype(int).to_numpy(),
+        "grid_bucket": sub["grid_bucket"].astype(str).to_numpy(),
+        "decade": sub["decade"].astype(str).to_numpy(),
+        "driverId": sub["driverId"].astype(int).to_numpy(),
+    })
+    model = smf.logit('podium ~ home + C(grid_bucket, Treatment(reference="1")) + C(decade)', data=data)
+    res = model.fit(disp=0, cov_type="cluster", cov_kwds={"groups": data["driverId"]})
+    low, high = res.conf_int().loc["home"]
+    return {
+        "odds_ratio": float(np.exp(res.params["home"])), "ci_low": float(np.exp(low)), "ci_high": float(np.exp(high)),
+        "p_value": float(res.pvalues["home"]), "n_rows": int(res.nobs), "n_home": int(data["home"].sum()),
+        "n_drivers": int(data["driverId"].nunique()), "converged": bool(res.mle_retvals["converged"]),
+        "strata_dropped": [str(v) for v in dropped],
+    }
+
+
+def sensitivity_subsets(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """(a) drivers with >= Q2_MIN_HOME_RACES home and >= Q2_MIN_AWAY_RACES away races; (b) recent seasons."""
+    per_driver = df.groupby("driverId")["home"].agg(n_home="sum", n_rows="size")
+    per_driver["n_away"] = per_driver["n_rows"] - per_driver["n_home"]
+    eligible = per_driver.index[
+        (per_driver["n_home"] >= config.Q2_MIN_HOME_RACES) & (per_driver["n_away"] >= config.Q2_MIN_AWAY_RACES)
+    ]
+    return {
+        f"(a) drivers with >= {config.Q2_MIN_HOME_RACES} home and >= {config.Q2_MIN_AWAY_RACES} away races":
+            df[df["driverId"].isin(eligible)],
+        f"(b) {config.Q2_RECENT_START_YEAR}+ only": df[df["year"] >= config.Q2_RECENT_START_YEAR],
+    }
+
+
+def q2_effects(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per analysis: main CMH, main clustered logistic, and CMH for each sensitivity subset."""
+    rows = [{"analysis": "main (all years)", "method": "CMH, stratified by grid bucket", **cmh_home_or(df)}]
+    rows.append({"analysis": "main (all years)", "method": "logistic + grid bucket + decade, clustered by driver",
+                 **logit_home_or(df)})
+    for name, subset in sensitivity_subsets(df).items():
+        rows.append({"analysis": name, "method": "CMH, stratified by grid bucket", **cmh_home_or(subset)})
+    return pd.DataFrame(rows)
