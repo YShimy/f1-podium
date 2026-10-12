@@ -215,7 +215,7 @@ entries = with_year(results[["raceId", "driverId"]]).merge(
     quali_pairs, on=["raceId", "driverId"], how="left", validate="many_to_one"
 )
 assert len(entries) == len(results), "join changed the row count"
-entries["has_quali"] = entries["has_quali"].fillna(False).astype(bool)
+entries["has_quali"] = entries["has_quali"].notna()  # True where a qualifying row matched
 
 races_with_results = set(results["raceId"])
 season = races.assign(
@@ -1460,8 +1460,196 @@ have no qualifying position; none is a grid front-row start.
 - **Eras are a coarse split.** Cars, rules and circuit layouts changed within each era.
 - **The secondary all-years window** includes 8 races (1951–1964) where shared drives put more than two cars on the grid's
   front row; it is shown for context only.
-- **Descriptive analysis of race outcomes.** Not a model feature, so the prediction cutoff does not apply.""")
+- **Descriptive analysis of race outcomes.** Not a model feature, so the prediction cutoff does not apply."""),
 
+
+    md("""### 8.8 Q2: do drivers podium more often in their home country, controlling for starting position?
+
+**The answer is in 8.12.**
+
+> **Cutoff note.** Like Q1, this is a descriptive analysis of race outcomes (podiums). It is not a model feature, so
+> the "known before lights-out" cutoff does not apply.
+
+**Grain.** `results_clean`: one row per `(raceId, driverId)`, joined to `races` (year, circuitId), `circuits` (country)
+and `drivers` (nationality). Every join is checked: unique keys, and an unchanged row count.
+
+**Definitions**
+- **Home:** the driver's nationality maps to the circuit's country. The mapping is
+  `src/f1podium/reference/nationality_to_country.csv` (nationality, country, note), with country values spelled exactly
+  as in `circuits.country`, or `no circuit` when the nationality has no circuit in the data.
+  - A nationality can have **more than one** country: American maps to both `USA` and `United States`, because
+    `circuits.csv` spells the Las Vegas Strip (2023–24) `United States`. The two dual nationalities map to both countries.
+  - Home is a lookup on unique (nationality, country) pairs, so it never adds rows.
+  - Reviewed choices: East German → Germany; Rhodesian and Irish → `no circuit`; `'Argentinian '` has a trailing space
+    in `drivers.csv` and is stripped.
+- **Podium:** `positionOrder <= 3`.
+- **Grid buckets** (`config.GRID_BUCKETS`): 1, 2–3, 4–6, 7–10, 11+, and 0 = pit lane.
+- **Pooled effect:** Cochran–Mantel–Haenszel (CMH) odds ratio of a podium at home vs away, stratified by grid bucket.
+  Robustness: a logistic regression `podium ~ home + C(grid_bucket) + C(decade)` with standard errors clustered by driver.
+  Sensitivity: (a) drivers with at least 1 home and 10 away races; (b) 2003 onwards."""),
+    code("""nat_map = de.load_nationality_map()
+map_check = de.check_nationality_map(nat_map, tables["drivers"], tables["circuits"])
+assert map_check["unmapped_nationalities"] == [], map_check
+assert map_check["unknown_countries"] == [], map_check
+
+home_df = de.build_home_table(results_clean, races, tables["circuits"], tables["drivers"], nat_map)
+assert len(home_df) == len(results_clean), "a join changed the row count"
+assert not home_df.duplicated(["raceId", "driverId"]).any()
+print(f"rows: results_clean {len(results_clean)} -> home table {len(home_df)}")"""),
+
+    md("""### 8.9 Mapping and missingness
+
+**Question:** does every driver have a usable nationality and every row a grid position, and how many rows can be
+"home" at all?"""),
+    code("""print("mapping check:", map_check)
+
+countries_with_home_drivers = set(nat_map.loc[nat_map["country"] != de.NO_CIRCUIT, "country"])
+coverage = pd.Series({
+    "rows": len(home_df),
+    "home rows": int(home_df["home"].sum()),
+    "away rows": int((~home_df["home"]).sum()),
+    "rows whose nationality is unmapped": int((~home_df["mapped"]).sum()),
+    "rows whose nationality has no circuit in the data": int((~home_df["has_home_circuit"]).sum()),
+    "rows at circuits in a country with no matching nationality": int(
+        (~home_df["circuit_country"].isin(countries_with_home_drivers)).sum()),
+    "rows with null grid": int(home_df["grid"].isna().sum()),
+    "rows with no grid bucket": int(home_df["grid_bucket"].isna().sum()),
+}).to_frame("count")
+assert coverage.loc["rows whose nationality is unmapped", "count"] == 0
+assert coverage.loc["rows with null grid", "count"] == 0
+display(coverage)
+
+print("nationalities with more than one country, and annotated (reviewed) rows of the mapping:")
+display(nat_map[(nat_map["note"] != "") | nat_map.duplicated("nationality", keep=False)].reset_index(drop=True))"""),
+    md("""**What it shows (missingness).**
+- **The mapping is complete.** All 43 driver nationalities map (0 unmapped), and every mapped country is either a
+  `circuits.country` value or `no circuit` (asserted). No driver lacks a nationality and no row lacks a grid position.
+- **1,950 of 24,761 rows (7.9%) are home starts.**
+- **Two groups can only ever be "away":** 2,362 rows from nationalities with no circuit in the data, and 1,705 rows at
+  circuits in countries that no nationality maps to (e.g. Bahrain, UAE).
+- **The reviewed mapping choices** (table above) touch fewer than 40 rows in total."""),
+
+    md("""### 8.10 Home vs away podium rate per grid bucket
+
+**Question:** within the same starting-position bucket, do drivers podium more often at home? Each row label shows the
+number of home and away starts; dots are rates and bars are Wilson 95% intervals."""),
+    code("""rates = de.bucket_rates(home_df)
+assert rates["n"].sum() == home_df["grid_bucket"].notna().sum()
+
+wide = rates.pivot(index="grid_bucket", columns="side", values=["n", "podiums", "rate", "ci_low", "ci_high"])
+order = [b for b in de.grid_bucket_labels()[1:] + de.grid_bucket_labels()[:1] if b in wide.index]
+labels = {b: f"{b}  (home n={int(wide.loc[b, ('n', 'home')])}, away n={int(wide.loc[b, ('n', 'away')])})"
+          for b in order}
+series = {}
+for side in ("home", "away"):
+    frame = rates[rates["side"] == side].set_index("grid_bucket")[["rate", "ci_low", "ci_high"]]
+    series[side] = frame.rename(index=labels)
+
+fig, ax = plots.new_figure(height=4.2)
+plots.rate_dot_plot(ax, [labels[b] for b in order], series, max_label=60)
+plots.style_axes(ax, "Podium rate at home vs away, by grid bucket", xlabel="podium rate")
+fig.tight_layout()
+plt.show()
+
+table = pd.DataFrame({
+    "home: podiums/n": [f"{int(wide.loc[b, ('podiums', 'home')])}/{int(wide.loc[b, ('n', 'home')])}" for b in order],
+    "home: rate": [wide.loc[b, ("rate", "home")] for b in order],
+    "home: 95% interval": [f"{wide.loc[b, ('ci_low', 'home')]:.0%} - {wide.loc[b, ('ci_high', 'home')]:.0%}" for b in order],
+    "away: podiums/n": [f"{int(wide.loc[b, ('podiums', 'away')])}/{int(wide.loc[b, ('n', 'away')])}" for b in order],
+    "away: rate": [wide.loc[b, ("rate", "away")] for b in order],
+    "away: 95% interval": [f"{wide.loc[b, ('ci_low', 'away')]:.0%} - {wide.loc[b, ('ci_high', 'away')]:.0%}" for b in order],
+}, index=pd.Index(order, name="grid bucket"))
+display(table.style.format({"home: rate": "{:.1%}", "away: rate": "{:.1%}"}))"""),
+    md("""**What it shows.**
+- **Within each grid bucket, home and away rates are close.** Home vs away: from P1 58.3% (49/84) vs 64.2% (668/1,040);
+  P2–3 53.7% (79/147) vs 50.9% (1,057/2,078); P4–6 26.4% (60/227) vs 26.0% (810/3,114); P7–10 7.1% (24/337) vs 9.2%
+  (379/4,116); P11+ 1.0% (12/1,146) vs 1.7% (204/12,344).
+- **The direction is not consistent:** home is a little higher in P2–3 and P4–6, and a little lower in P1, P7–10 and P11+.
+- **Every home interval overlaps its away interval.** That means the two are *not distinguishable at this sample size*
+  (84–1,146 home starts per bucket), not that they are equal.
+- **Pit lane:** no podiums at home or away (0/9, 0/119). The bucket carries no information on the odds ratio, so it is
+  left out of the pooled estimates below."""),
+
+    md("""### 8.11 Pooled home effect: CMH, logistic regression and sensitivity analyses
+
+**Question:** pooling the grid buckets, is the odds of a podium at home different from away? An odds ratio (OR) above 1
+means more podiums at home. Strata with no podiums carry no information on the OR and are dropped (listed in the table).
+The CMH test treats every row as independent; the logistic model clusters standard errors by driver."""),
+    code("""effects = de.q2_effects(home_df)
+shown = effects[["analysis", "method", "n_rows", "n_home", "odds_ratio", "ci_low", "ci_high", "p_value",
+                 "homogeneity_p", "strata_dropped"]].copy()
+shown["strata_dropped"] = shown["strata_dropped"].map(", ".join)
+display(shown.set_index(["analysis", "method"]).round({"odds_ratio": 3, "ci_low": 3, "ci_high": 3,
+                                                       "p_value": 4, "homogeneity_p": 3}))
+logit_row = effects[effects["method"].str.startswith("logistic")].iloc[0]
+assert logit_row["converged"], "the logistic regression did not converge"
+print(f"logistic: {int(logit_row['n_drivers'])} driver clusters, converged = {logit_row['converged']}")"""),
+    code("""from matplotlib.ticker import FixedLocator, FuncFormatter
+
+short = [
+    "Main: CMH by grid bucket",
+    "Main: logistic, clustered by driver",
+    "(a) >=1 home & >=10 away races: CMH",
+    f"(b) {config.Q2_RECENT_START_YEAR}+ only: CMH",
+]
+y = np.arange(len(effects))[::-1]
+fig, ax = plots.new_figure(height=3.4)
+ax.axvline(1.0, color=plots.INK_MUTED, linewidth=1, linestyle="--", zorder=1)
+ax.hlines(y, effects["ci_low"], effects["ci_high"], color=plots.SERIES[0], linewidth=2, zorder=2)
+ax.plot(effects["odds_ratio"], y, "o", color=plots.SERIES[0], markersize=7, markeredgecolor=plots.SURFACE, zorder=3)
+for yi, r in zip(y, effects.itertuples()):
+    ax.annotate(f"{r.odds_ratio:.2f} [{r.ci_low:.2f}, {r.ci_high:.2f}]  p={r.p_value:.2f}", (r.ci_high, yi),
+                xytext=(8, 0), textcoords="offset points", va="center", color=plots.INK_MUTED, fontsize=8)
+ax.set_xscale("log")
+ax.set_xlim(0.4, 2.5)
+ax.xaxis.set_major_locator(FixedLocator([0.5, 0.75, 1.0, 1.5, 2.0]))
+ax.xaxis.set_minor_locator(FixedLocator([]))
+ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+ax.set_yticks(y)
+ax.set_yticklabels(short)
+plots.style_axes(ax, "Odds ratio of a podium at home vs away (log scale; 1 = no difference)",
+                 xlabel="odds ratio (home / away)")
+fig.tight_layout()
+plt.show()"""),
+    md("""**What it shows.**
+- **Main CMH estimate: OR 0.91 (95% interval 0.76–1.08), p = 0.28**, on 24,633 rows (1,941 home); the pit-lane bucket is
+  dropped. The Breslow–Day p = 0.31 gives no evidence that the odds ratio differs between grid buckets, so pooling them is
+  reasonable.
+- **Logistic regression with decade, clustered by driver (686 drivers): OR 0.91 (0.74–1.12), p = 0.38.** The same answer
+  once era is controlled and the correlation between one driver's races is allowed for.
+- **Sensitivity (a), drivers with at least 1 home and 10 away races:** OR 0.93 (0.78–1.11), p = 0.41 (19,570 rows,
+  1,533 home). **(b) 2003 onwards:** OR 0.76 (0.52–1.13), p = 0.18 (8,884 rows, 364 home); fewer home starts, so a wider
+  interval.
+- **All four intervals include 1, and all four point estimates are below 1.**"""),
+
+    md("""### 8.12 Answer to Q2
+
+**No evidence of a home advantage.** Holding the starting-position bucket fixed, the odds of a podium at home vs away are
+**OR 0.91 (95% interval 0.76–1.08, p = 0.28)** (Cochran–Mantel–Haenszel).
+- The data are compatible with anything from about 24% lower to 8% higher odds at home. A large home advantage is
+  unlikely; a small effect in either direction cannot be ruled out.
+- **The result is robust:** logistic regression with decade and driver-clustered errors 0.91 (0.74–1.12); drivers with
+  at least 1 home and 10 away races 0.93 (0.78–1.11); 2003 onwards 0.76 (0.52–1.13). Every interval includes 1.
+- **Per bucket, home vs away:** P1 58.3% (49/84) vs 64.2% (668/1,040); P2–3 53.7% (79/147) vs 50.9% (1,057/2,078);
+  P4–6 26.4% (60/227) vs 26.0% (810/3,114); P7–10 7.1% (24/337) vs 9.2% (379/4,116); P11+ 1.0% (12/1,146) vs 1.7%
+  (204/12,344); pit lane 0/9 vs 0/119.
+
+**Grain and missingness.** One row per `(raceId, driverId)` of the cleaned results (24,761 rows); joins to races,
+circuits and drivers checked for unique keys and unchanged row counts. 0 unmapped nationalities, 0 null grid positions.
+1,950 rows are home starts.
+
+**Limitations**
+- **One nationality field.** It does not capture dual nationality (two dual nationalities are mapped to both countries),
+  residence, or a team's home. "Home" is a simplification.
+- **Confounding by driver strength and selection.** Home and away rows come from different mixes of drivers, and local
+  one-off entries in weaker cars were common at home races in early decades. Sensitivity (a) addresses this only partly. A
+  within-driver comparison (e.g. a conditional logistic model by driver) would be the next step *(Experiment)*.
+- **Mapping choices.** East German → Germany, Rhodesian and Irish → `no circuit`, and the US spelling split are judgement
+  calls; together they touch fewer than 40 rows.
+- **Grid buckets are coarse.** Starting positions still differ within a bucket.
+- **Independence.** The CMH test treats rows as independent; the logistic model clusters by driver and agrees.
+- **Overlapping intervals mean "not distinguishable at this n", not "no difference".**
+- **Descriptive analysis of race outcomes.** Not a model feature, so the prediction cutoff does not apply."""),
 ]
 
 nb = new_notebook(cells=cells)
