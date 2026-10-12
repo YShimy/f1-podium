@@ -1709,6 +1709,230 @@ circuits and drivers checked for unique keys and unchanged row counts. 0 unmappe
 - **Independence.** The CMH test treats rows as independent; the logistic model clusters by driver and agrees.
 - **Overlapping intervals mean "not distinguishable at this n", not "no difference".**
 - **Descriptive analysis of race outcomes.** Not a model feature, so the prediction cutoff does not apply."""),
+
+    md("""### 8.13 Q3: which constructors have the highest mechanical-retirement rate in 2014–2021 vs 2022–2024?
+
+**The answer is in 8.17.**
+
+> **Cutoff note: `status` is post-race.** A car's status (Engine, Collision, Finished, ...) is only known after the race.
+> This question *describes* reliability, so the prediction cutoff does not apply here. **`status` and anything
+> derived from it for the current race must never be a model feature.**
+
+**Grain.** `results_clean`: one row per `(raceId, driverId)` (a race start), joined to `races` (year), `constructors`
+(name) and `status` (status text), then to the status-category mapping. Every join is many-to-one and checked for an
+unchanged row count; a null `statusId` or an unmapped status raises. Rows outside 2014–2024 are dropped after the joins.
+
+**Definitions**
+- **Status category:** `src/f1podium/reference/status_category.csv` maps every one of the 139 statuses to
+  *finished*, *mechanical*, *accident_driver*, *regulatory* or *other*. Ambiguous statuses are flagged and carry an
+  alternative category (e.g. `Retired` → other, alternative mechanical).
+- **Mechanical retirement:** a race start whose status category is *mechanical*.
+- **Rate:** mechanical retirements ÷ starts, per `constructorId` and era, with a Wilson 95% interval.
+- **Eras:** 2014–2021 (hybrid era before the 2022 rules) and 2022–2024 (`config.Q3_ERAS`).
+- **Minimum:** 40 starts per constructor-era (`config.Q3_MIN_STARTS`, about one season with two cars).
+- **Sensitivity:** (a) renamed or bought teams merged into lineages (`reference/constructor_lineage.csv`);
+  (b) ambiguous statuses switched to their alternative category."""),
+    code("""status_map = de.load_status_categories()
+status_check = de.check_status_categories(status_map, tables["status"])
+assert status_check == {"unmapped_statuses": [], "unknown_statuses": []}, status_check
+assert results_clean["statusId"].notna().all(), "null statusId in results_clean"
+
+ret = de.build_retirement_table(results_clean, races, tables["constructors"], tables["status"], status_map)
+assert not ret.duplicated(["raceId", "driverId"]).any()
+in_eras = results_clean["raceId"].isin(
+    races.loc[races["year"].between(config.Q3_ERAS[0][1], config.Q3_ERAS[-1][2]), "raceId"])
+assert len(ret) == in_eras.sum(), "the era filter should be the only step that removes rows"
+
+lineage = de.load_constructor_lineage()
+ret_lin = de.add_lineage(ret, lineage)
+print(f"rows: results_clean {len(results_clean)} -> joined (all checks passed) -> {len(ret)} in "
+      f"{config.Q3_ERAS[0][1]}–{config.Q3_ERAS[-1][2]}")
+print("starts per era:", ret.groupby("era").size().to_dict())"""),
+
+    md("""### 8.14 Mapping and missingness
+
+**Question:** how are race starts split across the status categories, and how many rows depend on a judgement call
+(an ambiguous status)?"""),
+    code("""cat_counts = pd.crosstab(ret["category"], ret["era"], margins=True, margins_name="total")
+cat_share = pd.crosstab(ret["category"], ret["era"], normalize="columns")
+display(cat_counts.join(cat_share.add_suffix(" share").round(3)))
+
+print("ambiguous statuses that occur in the eras (rows per era), with the main and alternative category:")
+amb_rows = (
+    ret[ret["ambiguous"]].groupby(["status", "category", "alt_category", "era"]).size()
+    .unstack("era", fill_value=0).reset_index()
+)
+display(amb_rows.sort_values(amb_rows.columns[-2], ascending=False).reset_index(drop=True))
+
+missing = pd.Series({
+    "null statusId in results_clean": int(results_clean["statusId"].isna().sum()),
+    "statuses not in the mapping": len(status_check["unmapped_statuses"]),
+    "rows on an ambiguous status": int(ret["ambiguous"].sum()),
+    "rows whose mechanical flag flips under (b)": int((ret["mechanical"] != ret["mechanical_alt"]).sum()),
+}).to_frame("count")
+display(missing)"""),
+    md("""**What it shows (missingness).**
+- **Nothing is missing.** 0 null `statusId` in the cleaned results and 0 statuses without a category (asserted); every
+  join kept the row count. 4,623 starts fall in 2014–2024: 3,266 in 2014–2021 and 1,357 in 2022–2024.
+- **Mechanical retirements are 9.6% of starts in 2014–2021 (314) and 6.0% in 2022–2024 (82).** Finishes rose from
+  81.4% to 85.9%; accident/driver retirements stayed at about 7% (221 and 90).
+- **103 starts (2.2%) carry an ambiguous status**, and all 103 change their mechanical flag under sensitivity (b).
+  `Retired` is most of it (38 + 12), then `Wheel` (11 + 0) and `Withdrew` (8 + 3)."""),
+
+    md("""### 8.15 Mechanical-retirement rate per constructor and era
+
+**Question:** which constructors retire with a mechanical failure most often in each era? Constructors are ranked by rate
+within each era (only those meeting the minimum); dots are rates and bars are Wilson 95% intervals. The label shows
+mechanical retirements / starts."""),
+    code("""q3_rates = de.mechanical_rates(ret)
+assert (q3_rates["n_mech"] <= q3_rates["starts"]).all()
+assert q3_rates.groupby("era")["starts"].sum().to_dict() == ret.groupby("era").size().to_dict()
+q3_eras = [label for label, _, _ in config.Q3_ERAS]
+
+dropped = q3_rates[~q3_rates["meets_min"]]
+print(f"minimum {config.Q3_MIN_STARTS} starts: constructor-eras dropped per era:",
+      {era: int((dropped["era"] == era).sum()) for era in q3_eras},
+      "| kept:", {era: int(((q3_rates["era"] == era) & q3_rates["meets_min"]).sum()) for era in q3_eras})
+display(dropped[["era", "label", "n_mech", "starts", "rate"]].reset_index(drop=True))
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5.8), facecolor=plots.SURFACE, sharex=True)
+q3_tables = {}
+for ax, era in zip(axes, q3_eras):
+    g = q3_rates[(q3_rates["era"] == era) & q3_rates["meets_min"]].sort_values("rate", ascending=False)
+    g = g.assign(row=g["label"] + "  (" + g["n_mech"].astype(str) + "/" + g["starts"].astype(str) + ")")
+    assert g["row"].is_unique
+    ax.set_facecolor(plots.SURFACE)
+    plots.rate_dot_plot(ax, g["row"].tolist(), {"mechanical": g.set_index("row")}, max_label=40)
+    ax.set_xlim(0, 0.35)
+    plots.style_axes(ax, f"{era}: mechanical-retirement rate", xlabel="share of starts ending in a mechanical retirement")
+    q3_tables[era] = pd.DataFrame({
+        "mechanical/starts": (g["n_mech"].astype(str) + "/" + g["starts"].astype(str)).to_numpy(),
+        "rate": g["rate"].to_numpy(),
+        "95% interval": (g["ci_low"].map("{:.1%}".format) + " - " + g["ci_high"].map("{:.1%}".format)).to_numpy(),
+    }, index=pd.Index(g["label"], name="constructor"))
+fig.tight_layout()
+plt.show()
+
+for era in q3_eras:
+    print(f"{era}: constructors meeting the minimum, by rate")
+    display(q3_tables[era].style.format({"rate": "{:.1%}"}))
+
+sep_rows = []
+for era in q3_eras:
+    g = q3_rates[(q3_rates["era"] == era) & q3_rates["meets_min"]]
+    n_pairs, n_sep = de.ci_separated_pairs(g["ci_low"], g["ci_high"])
+    sep_rows.append({"era": era, "constructors": len(g), "pairs": n_pairs, "pairs_with_non_overlapping_ci": n_sep})
+print("constructor pairs whose 95% intervals do not overlap:")
+display(pd.DataFrame(sep_rows).set_index("era"))"""),
+    md("""**What it shows.**
+- **The minimum drops 2 of 19 constructors in 2014–2021** (Caterham 8/34 and Marussia 3/31, both 2014 only) and none of
+  12 in 2022–2024.
+- **2014–2021, highest rates:** Lotus F1 18.4% (14/76), Toro Rosso 16.1% (39/242), McLaren 14.4% (46/320), Renault
+  14.0% (28/200). **Lowest:** Aston Martin 2.3% (1/44; 2021 only), Mercedes 3.8% (12/320), Alfa Romeo 4.2% (5/120).
+- **2022–2024, highest rates:** Alfa Romeo 12.5% (11/88), Alpine 11.0% (15/136), AlphaTauri 8.0% (7/88).
+  **Lowest:** Sauber 2.1% (1/48; 2024 only), McLaren and Red Bull 3.7% (5/136 each).
+- **2014–2021 is partly resolved:** 21 of 136 constructor pairs have non-overlapping 95% intervals, e.g. Mercedes
+  (2.2%–6.4%) is clearly below McLaren (11.0%–18.6%) and Toro Rosso (12.0%–21.3%).
+- **2022–2024 is not resolved:** 0 of 66 pairs have non-overlapping intervals. With 48–136 starts and rates near 5%,
+  the ordering is *not distinguishable at this sample size*; that is not the same as "no difference"."""),
+
+    md("""### 8.16 Did it change between eras?
+
+**Question:** did the overall mechanical-retirement rate change from 2014–2021 to 2022–2024, and are the least reliable
+constructors in one era also the least reliable in the other? The overall comparison is the difference (new − old) with
+a Newcombe 95% interval and a two-sided two-proportion z-test; each start is treated as independent (two cars of the
+same team in the same race are correlated, so the uncertainty is somewhat understated). The scatter shows constructors
+meeting the minimum in both eras against the y = x line."""),
+    code("""def q3_summary(df, by, flag):
+    rates_ = de.mechanical_rates(df, by=by, flag=flag)
+    change = de.overall_mechanical_change(df, flag=flag)
+    rho = de.mechanical_rank_correlation(rates_, by=by)
+    tops = {era: ", ".join(
+                f"{r.label} {r.rate:.1%} ({r.n_mech}/{r.starts})"
+                for r in rates_[(rates_["era"] == era) & rates_["meets_min"]]
+                .sort_values("rate", ascending=False).head(3).itertuples())
+            for era in q3_eras}
+    return {
+        f"{q3_eras[0]}: mech/starts": f"{change['mech_old']}/{change['starts_old']}",
+        f"{q3_eras[0]}: rate": f"{change['rate_old']:.1%}",
+        f"{q3_eras[1]}: mech/starts": f"{change['mech_new']}/{change['starts_new']}",
+        f"{q3_eras[1]}: rate": f"{change['rate_new']:.1%}",
+        "difference (pct points)": f"{100 * change['diff']:+.1f}",
+        "95% interval": f"{100 * change['ci_low']:+.1f} to {100 * change['ci_high']:+.1f}",
+        "z": round(change["z"], 2), "p (two-sided)": f"{change['p_value']:.2g}",
+        "Spearman (groups in both eras)": f"{rho['spearman']:.2f} [{rho['ci_low']:.2f}, {rho['ci_high']:.2f}], n={rho['n_both_eras']}",
+        "dropped by minimum": int((~rates_["meets_min"]).sum()),
+        f"top 3 {q3_eras[0]}": tops[q3_eras[0]], f"top 3 {q3_eras[1]}": tops[q3_eras[1]],
+    }
+
+q3_sens = pd.DataFrame({
+    "main (constructorId)": q3_summary(ret, "constructorId", "mechanical"),
+    "(a) lineages merged": q3_summary(ret_lin, "lineage", "mechanical"),
+    "(b) ambiguous statuses flipped": q3_summary(ret, "constructorId", "mechanical_alt"),
+}).T
+with pd.option_context("display.max_colwidth", 120):
+    display(q3_sens.iloc[:, :9])
+    display(q3_sens.iloc[:, 9:])
+
+wide = (q3_rates[q3_rates["meets_min"]]
+        .pivot(index="constructorId", columns="era", values="rate").reindex(columns=q3_eras).dropna())
+names = q3_rates[q3_rates["era"] == q3_eras[1]].set_index("constructorId")["label"]
+wide.index = names.reindex(wide.index).to_numpy()
+fig, ax = plots.new_figure(width=6.2, height=6.0)
+plots.identity_scatter(ax, wide[q3_eras[0]], wide[q3_eras[1]], label_top=4)
+plots.style_axes(ax, f"Mechanical rate, {len(wide)} constructors in both eras",
+                 xlabel=f"rate, {q3_eras[0]}", ylabel=f"rate, {q3_eras[1]}")
+fig.tight_layout()
+plt.show()
+print("below the y = x line (lower rate in the newer era):", int((wide[q3_eras[1]] < wide[q3_eras[0]]).sum()),
+      "of", len(wide))"""),
+    md("""**What it shows.**
+- **The overall rate fell, and the fall is unlikely to be chance.** 9.6% (314/3,266) → 6.0% (82/1,357): −3.6 points
+  (95% interval −5.1 to −1.9; z = −3.95, p = 0.00008). Treating starts as independent makes this somewhat too precise.
+- **The ranking is not reproduced between eras.** For the 11 constructorIds that meet the minimum in both eras, Spearman
+  ρ = −0.46 (approximate 95% interval −0.84 to 0.23). With lineages merged, ρ = 0.08 (−0.58 to 0.68), n = 10. Both
+  intervals are wide and include 0, so the data cannot tell a stable reliability order from a reshuffle.
+- **6 of 11 constructors are below the y = x line** (lower rate in 2022–2024).
+- **Sensitivity (a), lineages merged:** the overall rates are the same by construction. The top three become Toro
+  Rosso/AlphaTauri/RB 14.7%, Lotus/Renault/Alpine 14.4% and McLaren 14.4% (2014–2021), and Lotus/Renault/Alpine 11.0%,
+  Sauber/Alfa Romeo 8.8% and Toro Rosso/AlphaTauri/RB 6.6% (2022–2024). Only Caterham drops.
+- **Sensitivity (b), ambiguous statuses flipped:** 11.2% → 6.8%, −4.4 points (−6.1 to −2.6, p = 0.000005). The top
+  three in 2014–2021 are Lotus F1 23.7%, Toro Rosso 18.2% and Renault 16.0%. In 2022–2024, RB (10.4%, 5/48) replaces
+  AlphaTauri in third place. **The direction and size of the change hold under both sensitivities.**"""),
+
+    md("""### 8.17 Answer to Q3
+
+**Highest mechanical-retirement rates (mechanical retirements / starts, constructors with at least 40 starts):**
+- **2014–2021:** Lotus F1 18.4% (14/76), Toro Rosso 16.1% (39/242), McLaren 14.4% (46/320). Mercedes had the lowest rate
+  among full-period teams, 3.8% (12/320), and its interval does not overlap McLaren's or Toro Rosso's.
+- **2022–2024:** Alfa Romeo 12.5% (11/88), Alpine 11.0% (15/136), AlphaTauri 8.0% (7/88). No two constructors are
+  distinguishable at this sample size (0 of 66 pairs with non-overlapping intervals).
+
+**Did it change?** Overall, mechanical retirements fell from **9.6% (314/3,266) to 6.0% (82/1,357)**, −3.6 points (95%
+interval −5.1 to −1.9; z = −3.95, p = 0.00008). The fall holds under both sensitivities. The constructor ordering is not
+reproduced between eras (Spearman −0.46, interval −0.84 to 0.23, 11 constructors). Which teams are least reliable
+appears to change, but the data cannot separate that from noise.
+
+**Grain and missingness.** One row per `(raceId, driverId)` of the cleaned results; joins to races, constructors, status
+and the category mapping are many-to-one with unchanged row counts (asserted). 4,623 starts in 2014–2024. 0 null
+`statusId`, 0 unmapped statuses. 103 starts (2.2%) have an ambiguous status (sensitivity b).
+
+**Status is post-race.** This analysis describes what happened. The prediction cutoff does not apply to it, and
+**`status` (or anything derived from the current race's status) must never be used as a model feature.**
+
+**Limitations**
+- **Renames and ownership changes.** The main analysis is per `constructorId`, so renamed teams split, for example
+  Toro Rosso → AlphaTauri → RB. Sensitivity (a) merges lineages; this changes which team-years are pooled but not the
+  overall answer. Lineage history is outside knowledge, not in the dataset.
+- **Short and uneven periods.** 2022–2024 has three seasons, and 2020 was shortened to 17 races. Constructors that
+  exist for one season in an era (Aston Martin and Alpine in 2021, RB and Sauber in 2024) have wide intervals.
+- **Classification is a judgement.** Ergast's status labels are coarse (`Retired`, `Withdrew`), and the category
+  mapping is ours. Sensitivity (b) shows the conclusions survive flipping every ambiguous status.
+- **A mechanical retirement can follow contact.** Damage from a collision can show up as e.g. `Suspension`, so the
+  mechanical rate partly includes accident consequences.
+- **Starts are treated as independent.** Two cars of one team in one race share parts and conditions, so the
+  intervals and p-values are somewhat too optimistic.
+- **Overlapping intervals mean "not distinguishable at this n", not "no difference".**"""),
 ]
 
 nb = new_notebook(cells=cells)

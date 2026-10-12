@@ -9,6 +9,10 @@ ranking change between eras? Qualifying position and grid position are kept apar
 
 Q2: do drivers podium more often at a circuit in their home country than elsewhere,
 controlling for starting position?
+
+Q3: which constructors have the highest mechanical-retirement rate in 2014–2021 vs
+2022–2024? `status` is only known after the race: it is used here to describe, and
+must never be a model feature.
 """
 
 from math import erfc, sqrt
@@ -525,3 +529,172 @@ def q2_effects(df: pd.DataFrame) -> pd.DataFrame:
     for name, subset in sensitivity_subsets(df).items():
         rows.append({"analysis": name, "method": "CMH, stratified by grid bucket", **cmh_home_or(subset)})
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Q3: mechanical-retirement rate per constructor, 2014–2021 vs 2022–2024
+# ---------------------------------------------------------------------------
+
+REFERENCE_DIR = Path(__file__).resolve().parent / "reference"
+STATUS_CATEGORY_PATH = REFERENCE_DIR / "status_category.csv"
+CONSTRUCTOR_LINEAGE_PATH = REFERENCE_DIR / "constructor_lineage.csv"
+STATUS_CATEGORIES = ("finished", "mechanical", "accident_driver", "regulatory", "other")
+STATUS_MAP_COLUMNS = ["status", "category", "ambiguous", "alt_category", "note"]
+LINEAGE_COLUMNS = ["constructorId", "constructorRef", "lineage", "note"]
+MECHANICAL = "mechanical"
+
+
+def load_status_categories(path: Path = STATUS_CATEGORY_PATH) -> pd.DataFrame:
+    """Read the status -> category mapping. `alt_category` (sensitivity) is set exactly on ambiguous rows.
+
+    Raises on wrong columns, duplicate statuses, unknown categories, or an alt_category that is
+    missing on an ambiguous row, present on a clear-cut row, or equal to the main category.
+    In the returned frame, clear-cut rows get alt_category = category.
+    """
+    m = pd.read_csv(path, dtype=str, keep_default_na=False)
+    if list(m.columns) != STATUS_MAP_COLUMNS:
+        raise ValueError(f"status mapping columns must be {STATUS_MAP_COLUMNS}, got {list(m.columns)}")
+    if (m["status"] == "").any():
+        raise ValueError("status mapping has an empty status")
+    if m["status"].duplicated().any():
+        raise ValueError(f"duplicate statuses: {sorted(m.loc[m['status'].duplicated(), 'status'])}")
+    if not m["ambiguous"].isin(["True", "False"]).all():
+        raise ValueError("ambiguous must be True or False")
+    m["ambiguous"] = m["ambiguous"] == "True"
+    if not m["category"].isin(STATUS_CATEGORIES).all():
+        raise ValueError(f"unknown category; allowed: {STATUS_CATEGORIES}")
+    alt_ok = np.where(m["ambiguous"],
+                      m["alt_category"].isin(STATUS_CATEGORIES) & (m["alt_category"] != m["category"]),
+                      m["alt_category"] == "")
+    if not alt_ok.all():
+        raise ValueError(f"bad alt_category for: {sorted(m.loc[~alt_ok, 'status'])}")
+    m["alt_category"] = m["alt_category"].where(m["ambiguous"], m["category"])
+    return m
+
+
+def check_status_categories(mapping: pd.DataFrame, status: pd.DataFrame) -> dict:
+    """Coverage of the mapping against status.csv: statuses with no mapping, and mapped names not in the data."""
+    names = set(status["status"].dropna())
+    return {
+        "unmapped_statuses": sorted(names - set(mapping["status"])),
+        "unknown_statuses": sorted(set(mapping["status"]) - names),
+    }
+
+
+def load_constructor_lineage(path: Path = CONSTRUCTOR_LINEAGE_PATH) -> pd.DataFrame:
+    """Read the constructorId -> lineage mapping (renamed or bought teams merged). Unique on constructorId."""
+    m = pd.read_csv(path, dtype={"constructorId": "Int64"}, keep_default_na=False)
+    if list(m.columns) != LINEAGE_COLUMNS:
+        raise ValueError(f"lineage columns must be {LINEAGE_COLUMNS}, got {list(m.columns)}")
+    _require_unique(m, ["constructorId"], "constructor lineage")
+    if (m["lineage"].str.strip() == "").any():
+        raise ValueError("lineage has empty values")
+    return m
+
+
+def assign_q3_era(year: pd.Series, eras=config.Q3_ERAS) -> pd.Series:
+    """Era label per year from config.Q3_ERAS; years outside every era are missing."""
+    out = pd.Series(pd.NA, index=year.index, dtype="object")
+    for label, first, last in eras:
+        out[year.between(first, last).fillna(False).to_numpy(bool)] = label
+    return out
+
+
+def build_retirement_table(
+    results_clean: pd.DataFrame,
+    races: pd.DataFrame,
+    constructors: pd.DataFrame,
+    status: pd.DataFrame,
+    mapping: pd.DataFrame,
+    eras=config.Q3_ERAS,
+) -> pd.DataFrame:
+    """One row per (raceId, driverId) of the cleaned results in the Q3 eras, with constructor and status category.
+
+    Joins: cleaned results -> races (year) -> constructors (name) -> status (text) -> mapping (category).
+    Every join is many-to-one and is checked for an unchanged row count; a null statusId, an unknown
+    raceId/constructorId/statusId or an unmapped status raises. The era filter is applied last.
+
+    Columns added: year, era, constructor, status, category, alt_category, ambiguous,
+    mechanical (category == mechanical) and mechanical_alt (ambiguous statuses flipped).
+    """
+    _require_unique(results_clean, KEY, "results_clean")
+    _require_unique(races, ["raceId"], "races")
+    _require_unique(constructors, ["constructorId"], "constructors")
+    _require_unique(status, ["statusId"], "status")
+    _require_unique(mapping, ["status"], "status mapping")
+    if results_clean["statusId"].isna().any():
+        raise AssertionError("cleaned results have a null statusId")
+
+    n = len(results_clean)
+    out = results_clean[KEY + ["constructorId", "statusId"]].copy()
+    out = out.merge(races[["raceId", "year"]], on="raceId", how="left", validate="many_to_one")
+    _require_rows(out, n, "join to races")
+    out = out.merge(constructors[["constructorId", "name"]].rename(columns={"name": "constructor"}),
+                    on="constructorId", how="left", validate="many_to_one")
+    _require_rows(out, n, "join to constructors")
+    out = out.merge(status[["statusId", "status"]], on="statusId", how="left", validate="many_to_one")
+    _require_rows(out, n, "join to status")
+    out = out.merge(mapping[["status", "category", "alt_category", "ambiguous"]], on="status",
+                    how="left", validate="many_to_one")
+    _require_rows(out, n, "join to status mapping")
+    for col, what in [("year", "a raceId not in races"), ("constructor", "a constructorId not in constructors"),
+                      ("status", "a statusId not in status"), ("category", "a status not in the mapping")]:
+        if out[col].isna().any():
+            raise AssertionError(f"{int(out[col].isna().sum())} rows with {what}")
+
+    out["era"] = assign_q3_era(out["year"], eras)
+    out = out[out["era"].notna()].reset_index(drop=True)
+    out["ambiguous"] = out["ambiguous"].astype(bool)
+    out["mechanical"] = out["category"] == MECHANICAL
+    out["mechanical_alt"] = out["alt_category"] == MECHANICAL
+    return out
+
+
+def add_lineage(df: pd.DataFrame, lineage: pd.DataFrame) -> pd.DataFrame:
+    """Add a `lineage` column; raises if a constructorId in df is not in the lineage file."""
+    out = df.merge(lineage[["constructorId", "lineage"]], on="constructorId", how="left", validate="many_to_one")
+    _require_rows(out, len(df), "join to lineage")
+    if out["lineage"].isna().any():
+        raise AssertionError("constructorIds missing from the lineage file: "
+                             f"{sorted(out.loc[out['lineage'].isna(), 'constructorId'].unique())}")
+    return out
+
+
+def mechanical_rates(df: pd.DataFrame, by: str = "constructorId", flag: str = "mechanical",
+                     min_starts: int = config.Q3_MIN_STARTS) -> pd.DataFrame:
+    """Per group x era: starts, mechanical retirements, rate, Wilson 95% interval and `meets_min`.
+
+    `label` is the display name: the constructor's name (its latest in the era) or the lineage itself.
+    """
+    label_col = "constructor" if by == "constructorId" else by
+    out = (
+        df.sort_values("year", kind="stable")
+        .groupby([by, "era"], observed=True)
+        .agg(label=(label_col, "last"), starts=(flag, "size"), n_mech=(flag, "sum"))
+        .reset_index()
+    )
+    out["n_mech"] = out["n_mech"].astype(int)
+    out["rate"] = out["n_mech"] / out["starts"]
+    out["ci_low"], out["ci_high"] = wilson_interval(out["n_mech"], out["starts"])
+    out["meets_min"] = out["starts"] >= min_starts
+    return out
+
+
+def overall_mechanical_change(df: pd.DataFrame, flag: str = "mechanical", eras=config.Q3_ERAS) -> dict:
+    """Overall mechanical-retirement rate in the first vs second era, with the two-proportion test."""
+    (old, *_), (new, *_) = eras
+    n = df.groupby("era").size()
+    k = df.groupby("era")[flag].sum()
+    test = two_proportion_test(int(k[old]), int(n[old]), int(k[new]), int(n[new]))
+    return {"starts_old": int(n[old]), "mech_old": int(k[old]), "rate_old": k[old] / n[old],
+            "starts_new": int(n[new]), "mech_new": int(k[new]), "rate_new": k[new] / n[new], **test}
+
+
+def mechanical_rank_correlation(rates: pd.DataFrame, by: str = "constructorId", eras=config.Q3_ERAS) -> dict:
+    """Spearman correlation of the group rates between eras, for groups meeting the minimum in both eras."""
+    (old, *_), (new, *_) = eras
+    kept = rates[rates["meets_min"]]
+    wide = kept.pivot(index=by, columns="era", values="rate").reindex(columns=[old, new]).dropna()
+    rho = wide[old].corr(wide[new], method="spearman") if len(wide) > 2 else np.nan
+    low, high = spearman_interval(rho, len(wide))
+    return {"n_both_eras": len(wide), "spearman": rho, "ci_low": low, "ci_high": high}

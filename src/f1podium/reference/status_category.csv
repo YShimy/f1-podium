@@ -1,0 +1,140 @@
+status,category,ambiguous,alt_category,note
++1 Lap,finished,False,,classified finisher
++10 Laps,finished,False,,classified finisher
++11 Laps,finished,False,,classified finisher
++12 Laps,finished,False,,classified finisher
++13 Laps,finished,False,,classified finisher
++14 Laps,finished,False,,classified finisher
++15 Laps,finished,False,,classified finisher
++16 Laps,finished,False,,classified finisher
++17 Laps,finished,False,,classified finisher
++18 Laps,finished,False,,classified finisher
++19 Laps,finished,False,,classified finisher
++2 Laps,finished,False,,classified finisher
++20 Laps,finished,False,,classified finisher
++21 Laps,finished,False,,classified finisher
++22 Laps,finished,False,,classified finisher
++23 Laps,finished,False,,classified finisher
++24 Laps,finished,False,,classified finisher
++25 Laps,finished,False,,classified finisher
++26 Laps,finished,False,,classified finisher
++29 Laps,finished,False,,classified finisher
++3 Laps,finished,False,,classified finisher
++30 Laps,finished,False,,classified finisher
++38 Laps,finished,False,,classified finisher
++4 Laps,finished,False,,classified finisher
++42 Laps,finished,False,,classified finisher
++44 Laps,finished,False,,classified finisher
++46 Laps,finished,False,,classified finisher
++49 Laps,finished,False,,classified finisher
++5 Laps,finished,False,,classified finisher
++6 Laps,finished,False,,classified finisher
++7 Laps,finished,False,,classified finisher
++8 Laps,finished,False,,classified finisher
++9 Laps,finished,False,,classified finisher
+Finished,finished,False,,classified finisher
+Alternator,mechanical,False,,
+Axle,mechanical,False,,
+Battery,mechanical,False,,
+Brake duct,mechanical,False,,
+Brakes,mechanical,False,,
+CV joint,mechanical,False,,
+Chassis,mechanical,False,,
+Clutch,mechanical,False,,
+Cooling system,mechanical,False,,
+Crankshaft,mechanical,False,,
+Differential,mechanical,False,,
+Distributor,mechanical,False,,
+Driver Seat,mechanical,True,other,"car equipment, not drivetrain"
+Driveshaft,mechanical,False,,
+Drivetrain,mechanical,False,,
+ERS,mechanical,False,,
+Electrical,mechanical,False,,
+Electronics,mechanical,False,,
+Engine,mechanical,False,,
+Engine fire,mechanical,False,,
+Engine misfire,mechanical,False,,
+Exhaust,mechanical,False,,
+Fire,mechanical,False,,
+Fuel,mechanical,False,,
+Fuel leak,mechanical,False,,
+Fuel pipe,mechanical,False,,
+Fuel pressure,mechanical,False,,
+Fuel pump,mechanical,False,,
+Fuel system,mechanical,False,,
+Gearbox,mechanical,False,,
+Halfshaft,mechanical,False,,
+Handling,mechanical,True,accident_driver,car problem as reported; may hide earlier damage
+Heat shield fire,mechanical,False,,
+Hydraulics,mechanical,False,,
+Ignition,mechanical,False,,
+Injection,mechanical,False,,
+Launch control,mechanical,False,,
+Magneto,mechanical,False,,
+Mechanical,mechanical,False,,
+Oil leak,mechanical,False,,
+Oil line,mechanical,False,,
+Oil pipe,mechanical,False,,
+Oil pressure,mechanical,False,,
+Oil pump,mechanical,False,,
+Overheating,mechanical,False,,
+Pneumatics,mechanical,False,,
+Power Unit,mechanical,False,,
+Power loss,mechanical,False,,
+Radiator,mechanical,False,,
+Rear wing,mechanical,True,accident_driver,usually structural or DRS failure; sometimes damage
+Safety belt,mechanical,True,other,"car equipment, not drivetrain"
+Seat,mechanical,True,other,"car equipment, not drivetrain"
+Spark plugs,mechanical,False,,
+Stalled,mechanical,True,accident_driver,clutch/anti-stall fault or driver error at the start
+Steering,mechanical,False,,
+Supercharger,mechanical,False,,
+Suspension,mechanical,False,,
+Technical,mechanical,False,,
+Throttle,mechanical,False,,
+Track rod,mechanical,False,,
+Transmission,mechanical,False,,
+Turbo,mechanical,False,,
+Undertray,mechanical,True,accident_driver,"floor failure, or damage from kerbs or contact"
+Vibrations,mechanical,True,other,"car fault, or a flat-spotted tyre (driver)"
+Water leak,mechanical,False,,
+Water pipe,mechanical,False,,
+Water pressure,mechanical,False,,
+Water pump,mechanical,False,,
+Wheel,mechanical,True,other,wheel coming loose: hub/wheel failure or unsafe pit stop
+Wheel bearing,mechanical,False,,
+Wheel rim,mechanical,False,,
+Accident,accident_driver,False,,
+Broken wing,accident_driver,True,mechanical,usually damage from contact; sometimes structural failure
+Collision,accident_driver,False,,
+Collision damage,accident_driver,False,,
+Damage,accident_driver,True,mechanical,damage from an incident or debris; label does not say which
+Debris,accident_driver,True,mechanical,damage from an incident or debris; label does not say which
+Fatal accident,accident_driver,False,,
+Front wing,accident_driver,True,mechanical,usually damage from contact; sometimes structural failure
+Spun off,accident_driver,False,,
+107% Rule,regulatory,False,,
+Did not prequalify,regulatory,False,,
+Did not qualify,regulatory,False,,
+Disqualified,regulatory,False,,
+Excluded,regulatory,False,,
+Underweight,regulatory,False,,
+Driver unwell,other,False,,
+Eye injury,other,False,,
+Fuel rig,other,True,mechanical,"pit refuelling equipment (pre-2010), not the car"
+Illness,other,False,,
+Injured,other,False,,
+Injury,other,False,,
+Not classified,other,False,,
+Not restarted,other,False,,
+Out of fuel,other,True,mechanical,fuel-load miscalculation (strategy) or fuel-system fault
+Physical,other,False,,
+Puncture,other,True,mechanical,"tyre failure: usually debris, contact or the tyre supplier"
+Refuelling,other,True,mechanical,"pit refuelling equipment (pre-2010), not the car"
+Retired,other,True,mechanical,generic label: unspecified failures and strategic retirements
+Safety,other,True,mechanical,"car stopped on safety grounds, often a suspected car fault"
+Safety concerns,other,True,mechanical,"car stopped on safety grounds, often a suspected car fault"
+Tyre,other,True,mechanical,"tyre failure: usually debris, contact or the tyre supplier"
+Tyre puncture,other,True,mechanical,"tyre failure: usually debris, contact or the tyre supplier"
+Wheel nut,other,True,mechanical,mostly a pit-stop wheel-gun or nut error (operational)
+Withdrew,other,True,mechanical,withdrawn after taking a grid slot (grid > 0 rows only remain after cleaning); car problem or safety/driver reason

@@ -1,4 +1,5 @@
-"""Tests for the data-engineering helpers: Q1 (front-row conversion) and Q2 (home advantage)."""
+"""Tests for the data-engineering helpers: Q1 (front-row conversion), Q2 (home advantage) and
+Q3 (mechanical retirements per constructor)."""
 
 import numpy as np
 import pandas as pd
@@ -314,3 +315,144 @@ def test_cmh_identical_strata_and_uninformative_stratum():
     assert out["homogeneity_p"] == pytest.approx(1.0)
     assert out["strata_dropped"] == [config.GRID_BUCKET_PIT_LANE]
     assert out["n_rows"] == 80
+
+
+# ---------------------------------------------------------------------------
+# Q3: mechanical retirements per constructor
+# ---------------------------------------------------------------------------
+
+Q3_RAW_PRESENT = all((config.RAW_DIR / f"{t}.csv").exists() for t in ("status", "results", "races"))
+
+
+@pytest.mark.skipif(not Q3_RAW_PRESENT, reason="raw data not available")
+def test_status_mapping_covers_every_status_in_the_real_data():
+    mapping = de.load_status_categories()
+    status = load_table("status")
+    assert de.check_status_categories(mapping, status) == {"unmapped_statuses": [], "unknown_statuses": []}
+    assert len(mapping) == len(status)
+
+
+def test_status_mapping_file_is_well_formed():
+    mapping = de.load_status_categories()
+    assert mapping["status"].is_unique
+    assert set(mapping["category"]) <= set(de.STATUS_CATEGORIES)
+    amb = mapping[mapping["ambiguous"]]
+    assert (amb["alt_category"] != amb["category"]).all()
+    assert (mapping.loc[~mapping["ambiguous"], "alt_category"] == mapping.loc[~mapping["ambiguous"], "category"]).all()
+    cat = mapping.set_index("status")["category"]
+    assert cat["Finished"] == "finished" and cat["+1 Lap"] == "finished"
+    assert cat["Engine"] == de.MECHANICAL and cat["Collision"] == "accident_driver"
+    assert cat["Disqualified"] == "regulatory" and cat["Retired"] == "other"
+
+
+@pytest.mark.parametrize("rows, message", [
+    ("status,category,ambiguous,alt_category,note\nEngine,mechanical,False,,\nEngine,mechanical,False,,\n", "duplicate"),
+    ("status,category,ambiguous,alt_category,note\nEngine,broken,False,,\n", "unknown category"),
+    ("status,category,ambiguous,alt_category,note\nRetired,other,True,,\n", "alt_category"),
+    ("status,category,ambiguous,alt_category,note\nEngine,mechanical,False,other,\n", "alt_category"),
+    ("status,category,ambiguous,alt_category,note\nRetired,other,True,other,\n", "alt_category"),
+    ("status,category\nEngine,mechanical\n", "columns"),
+])
+def test_load_status_categories_rejects_bad_files(tmp_path, rows, message):
+    path = tmp_path / "map.csv"
+    path.write_text(rows, encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        de.load_status_categories(path)
+
+
+@pytest.mark.skipif(not Q3_RAW_PRESENT, reason="raw data not available")
+def test_lineage_covers_every_constructor_that_raced_in_the_q3_eras():
+    lineage = de.load_constructor_lineage()
+    races = load_table("races")
+    results = load_table("results")
+    first, last = config.Q3_ERAS[0][1], config.Q3_ERAS[-1][2]
+    in_window = results["raceId"].isin(races.loc[races["year"].between(first, last), "raceId"])
+    assert set(results.loc[in_window, "constructorId"]) <= set(lineage["constructorId"])
+    lin = lineage.set_index("constructorRef")["lineage"]
+    assert lin["toro_rosso"] == lin["alphatauri"] == lin["rb"]
+    assert lin["mclaren"] == "McLaren"
+
+
+@pytest.fixture
+def q3_tables():
+    # raceId 1: 2016; raceId 2: 2023; raceId 3: 2010 (outside both eras).
+    results = ints(
+        [
+            # raceId, driverId, constructorId, statusId
+            (1, 1, 100, 1),   # finished
+            (1, 2, 100, 5),   # engine -> mechanical
+            (1, 3, 200, 31),  # retired -> other (ambiguous, alt mechanical)
+            (1, 4, 200, 4),   # collision
+            (2, 1, 100, 5),
+            (2, 2, 200, 1),
+            (3, 1, 100, 5),   # outside the eras: dropped after the joins
+        ],
+        ["raceId", "driverId", "constructorId", "statusId"],
+    )
+    races = ints([(1, 2016), (2, 2023), (3, 2010)], ["raceId", "year"])
+    constructors = pd.DataFrame({"constructorId": pd.array([100, 200], dtype="Int64"), "name": ["Alpha", "Beta"]})
+    status = pd.DataFrame({"statusId": pd.array([1, 4, 5, 31], dtype="Int64"),
+                           "status": ["Finished", "Collision", "Engine", "Retired"]})
+    return results, races, constructors, status, de.load_status_categories()
+
+
+def test_retirement_table_keeps_rows_and_flags_mechanical(q3_tables):
+    out = de.build_retirement_table(*q3_tables)
+    assert len(out) == 6                                         # 7 rows joined, 1 outside the eras
+    assert not out.duplicated(de.KEY).any()
+    assert out.groupby("era").size().to_dict() == {"2014–2021": 4, "2022–2024": 2}
+    assert out["mechanical"].sum() == 2
+    assert out["mechanical_alt"].sum() == 3                      # Retired flips to mechanical
+    assert out.loc[out["status"] == "Retired", "ambiguous"].all()
+
+
+@pytest.mark.parametrize("break_it, message", [
+    (lambda r, s: (pd.concat([r, r.iloc[[0]]]), s), "not unique"),
+    (lambda r, s: (r.assign(statusId=r["statusId"].mask(r.index == 0)), s), "null statusId"),
+    (lambda r, s: (r, s.assign(status=s["status"].replace("Engine", "Warp core"))), "not in the mapping"),
+    (lambda r, s: (r, s[s["statusId"] != 5]), "statusId not in status"),
+])
+def test_retirement_table_rejects_bad_inputs(q3_tables, break_it, message):
+    results, races, constructors, status, mapping = q3_tables
+    results, status = break_it(results, status)
+    with pytest.raises(AssertionError, match=message):
+        de.build_retirement_table(results, races, constructors, status, mapping)
+
+
+def test_retirement_table_join_row_count_check(q3_tables):
+    results, races, constructors, status, mapping = q3_tables
+    dup_status = pd.concat([status, status.iloc[[0]]])          # a duplicated statusId would multiply rows
+    with pytest.raises(AssertionError, match="not unique"):
+        de.build_retirement_table(results, races, constructors, dup_status, mapping)
+
+
+def test_mechanical_rates_counts_and_minimum(q3_tables):
+    out = de.build_retirement_table(*q3_tables)
+    rates = de.mechanical_rates(out, min_starts=2).set_index(["constructorId", "era"])
+    alpha_old = rates.loc[(100, "2014–2021")]
+    assert (alpha_old["starts"], alpha_old["n_mech"], alpha_old["rate"]) == (2, 1, 0.5)
+    assert alpha_old["label"] == "Alpha" and alpha_old["meets_min"]
+    assert not rates.loc[(100, "2022–2024"), "meets_min"]       # 1 start < 2
+    assert rates.loc[(200, "2014–2021"), "n_mech"] == 0
+
+
+def test_wilson_interval_known_case_for_q3_rates():
+    low, high = de.wilson_interval(3, 40)                       # 7.5%
+    assert low == pytest.approx(0.0258, abs=1e-4)
+    assert high == pytest.approx(0.1986, abs=1e-4)
+
+
+def test_overall_mechanical_change_counts(q3_tables):
+    out = de.build_retirement_table(*q3_tables)
+    res = de.overall_mechanical_change(out)
+    assert (res["starts_old"], res["mech_old"], res["starts_new"], res["mech_new"]) == (4, 1, 2, 1)
+    assert res["diff"] == pytest.approx(0.5 - 0.25)
+    alt = de.overall_mechanical_change(out, flag="mechanical_alt")
+    assert alt["mech_old"] == 2
+
+
+def test_add_lineage_raises_on_missing_constructor(q3_tables):
+    out = de.build_retirement_table(*q3_tables)
+    lineage = pd.DataFrame({"constructorId": pd.array([100], dtype="Int64"), "lineage": ["A"]})
+    with pytest.raises(AssertionError, match="missing from the lineage"):
+        de.add_lineage(out, lineage)

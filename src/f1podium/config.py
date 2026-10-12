@@ -91,6 +91,10 @@ Q2_MIN_HOME_RACES = 1                   # sensitivity (a): drivers with at least
 Q2_MIN_AWAY_RACES = 10                  # ... and at least this many away races
 Q2_RECENT_START_YEAR = 2003             # sensitivity (b): seasons from this year on
 
+# Q3 (mechanical retirements per constructor). Eras as (label, first year, last year).
+Q3_ERAS = (("2014–2021", 2014, 2021), ("2022–2024", 2022, 2024))
+Q3_MIN_STARTS = 40                      # minimum starts per constructor-era (about one season, two cars)
+
 # Missing-value sentinel used throughout the Ergast CSVs.
 NA_VALUES = ["\\N"]
 

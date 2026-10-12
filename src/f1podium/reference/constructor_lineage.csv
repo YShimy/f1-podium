@@ -1,0 +1,21 @@
+constructorId,constructorRef,lineage,note
+1,mclaren,McLaren,
+3,williams,Williams,
+6,ferrari,Ferrari,
+9,red_bull,Red Bull,
+131,mercedes,Mercedes,
+210,haas,Haas F1 Team,
+207,caterham,Caterham,
+5,toro_rosso,Toro Rosso / AlphaTauri / RB,Faenza team renamed (2020 AlphaTauri; 2024 RB)
+213,alphatauri,Toro Rosso / AlphaTauri / RB,Faenza team renamed (2020 AlphaTauri; 2024 RB)
+215,rb,Toro Rosso / AlphaTauri / RB,Faenza team renamed (2020 AlphaTauri; 2024 RB)
+10,force_india,Force India / Racing Point / Aston Martin,Silverstone team bought mid-2018 (Racing Point); renamed 2021 (Aston Martin)
+211,racing_point,Force India / Racing Point / Aston Martin,Silverstone team bought mid-2018 (Racing Point); renamed 2021 (Aston Martin)
+117,aston_martin,Force India / Racing Point / Aston Martin,Silverstone team bought mid-2018 (Racing Point); renamed 2021 (Aston Martin)
+208,lotus_f1,Lotus / Renault / Alpine,Enstone team bought by Renault for 2016; renamed Alpine 2021
+4,renault,Lotus / Renault / Alpine,Enstone team bought by Renault for 2016; renamed Alpine 2021
+214,alpine,Lotus / Renault / Alpine,Enstone team bought by Renault for 2016; renamed Alpine 2021
+15,sauber,Sauber / Alfa Romeo,Hinwil team; Alfa Romeo 2019-2023; Ergast reuses constructorId 15 for Sauber in 2024
+51,alfa,Sauber / Alfa Romeo,Hinwil team; Alfa Romeo 2019-2023; Ergast reuses constructorId 15 for Sauber in 2024
+206,marussia,Marussia / Manor,Banbury team renamed Manor Marussia for 2015
+209,manor,Marussia / Manor,Banbury team renamed Manor Marussia for 2015
