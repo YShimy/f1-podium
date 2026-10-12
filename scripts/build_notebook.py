@@ -36,22 +36,36 @@ Reusable code lives in `src/f1podium/`."""),
 
     md("""## 1. Setup
 
-Make the `src/` folder importable. We search upwards from the current folder so the
-same cell works when run from `notebooks/`, from the repo root, or on Kaggle
-(where `src/` must be provided alongside the notebook)."""),
+Make the `src/` folder importable.
+- **On Kaggle:** if a dataset under `/kaggle/input` contains `src/VERSION` (made by `scripts/package_kaggle.py`),
+  that packaged `src/` is used and its **commit hash is printed**. Check that it matches the final commit before submitting.
+- **Otherwise:** the repo's `src/`, found by searching upwards from the current folder, so the same cell works
+  from `notebooks/` or from the repo root."""),
     code("""import sys
 from pathlib import Path
 
-def _add_src_to_path() -> Path:
+def _add_src_to_path():
+    # Returns (src dir, commit hash or None) and puts the src dir first on sys.path.
+    # 1. Kaggle: a dataset made by scripts/package_kaggle.py has <dataset>/src/VERSION.
+    kaggle_input = Path("/kaggle/input")
+    if kaggle_input.exists():
+        for pattern in ("*/src/VERSION", "*/*/src/VERSION"):
+            for version_file in sorted(kaggle_input.glob(pattern)):
+                src = version_file.parent
+                sys.path.insert(0, str(src))
+                return src, version_file.read_text().strip()
+    # 2. Otherwise the repo's src/, found by searching upwards from the working directory.
     for base in [Path.cwd(), *Path.cwd().parents]:
         if (base / "src" / "f1podium").is_dir():
             src = base / "src"
             if str(src) not in sys.path:
                 sys.path.insert(0, str(src))
-            return src
+            return src, None
     raise FileNotFoundError("Could not find src/f1podium above " + str(Path.cwd()))
 
-SRC_DIR = _add_src_to_path()
+SRC_DIR, SRC_COMMIT = _add_src_to_path()
+print("src dir    :", SRC_DIR)
+print("src commit :", SRC_COMMIT or "none (using the repo's src/, not a packaged copy)")
 
 %load_ext autoreload
 %autoreload 2"""),
