@@ -1895,9 +1895,13 @@ print("below the y = x line (lower rate in the newer era):", int((wide[q3_eras[1
   ρ = −0.46 (approximate 95% interval −0.84 to 0.23). With lineages merged, ρ = 0.08 (−0.58 to 0.68), n = 10. Both
   intervals are wide and include 0, so the data cannot tell a stable reliability order from a reshuffle.
 - **6 of 11 constructors are below the y = x line** (lower rate in 2022–2024).
-- **Sensitivity (a), lineages merged:** the overall rates are the same by construction. The top three become Toro
-  Rosso/AlphaTauri/RB 14.7%, Lotus/Renault/Alpine 14.4% and McLaren 14.4% (2014–2021), and Lotus/Renault/Alpine 11.0%,
-  Sauber/Alfa Romeo 8.8% and Toro Rosso/AlphaTauri/RB 6.6% (2022–2024). Only Caterham drops.
+- **Sensitivity (a), lineages merged** (`reference/constructor_lineage.csv`, the same mapping the modeling table uses):
+  the overall rates are the same by construction.
+  - **2014–2021 top three:** Minardi / Toro Rosso / AlphaTauri / RB 14.7% (47/320), then McLaren and Toleman / Benetton
+    / Renault / Lotus / Alpine, both 14.4% (46/320).
+  - **2022–2024 top three:** Toleman / … / Alpine 11.0% (15/136), Sauber / BMW Sauber / Alfa Romeo 8.8% (12/136), then
+    Ferrari and Minardi / … / RB, both 6.6% (9/136).
+  - Only Caterham drops below the minimum.
 - **Sensitivity (b), ambiguous statuses flipped:** 11.2% → 6.8%, −4.4 points (−6.1 to −2.6, p = 0.000005). The top
   three in 2014–2021 are Lotus F1 23.7%, Toro Rosso 18.2% and Renault 16.0%. In 2022–2024, RB (10.4%, 5/48) replaces
   AlphaTauri in third place. **The direction and size of the change hold under both sensitivities.**"""),
@@ -1956,6 +1960,12 @@ so the target can never slip into the features. Code: `src/f1podium/features.py`
 - Sprint points of earlier rounds count towards `points_before`; the current round's sprint is never used.
 - `rank_before` ranks `points_before` within race R's field (ties share the best rank); NaN at round 1.
 - Rolling windows use partial history (NaN only with no earlier race); `races_before` says how much history there is.
+- **Constructor features follow the team lineage** (`config.CONSTRUCTOR_KEY = "lineage"`). Renamed or bought teams are
+  merged by `reference/constructor_lineage.csv`, which maps (constructorId, year range) to a lineage: e.g. Tyrrell /
+  BAR / Honda / Brawn / Mercedes, Minardi / Toro Rosso / AlphaTauri / RB, Jordan / … / Aston Martin. Ergast ids reused
+  for unrelated teams (Renault 1977–85, Mercedes 1954–55, Aston Martin 1959–60) are kept apart. The `constructorId`
+  variant stays available for an ablation. Constructor rows are aggregated to one row per (lineage, race) **before**
+  shifting, so a teammate's result in the same race never enters a feature.
 - **Still open:** the training window and the missing-qualifying strategy (the table keeps NaN plus `has_quali`)."""),
     code("""from f1podium import features as feats
 from f1podium import leakage
@@ -1995,25 +2005,36 @@ print("qualifying coverage by season, 1994–2003:", q_cov.loc[1994:2003].round(
   validation, 0% in test). `has_quali` marks it. How to fill it is still an open decision, for the pipeline.
 - **`rank_before` is NaN on round-1 rows only** (6.5%), by design.
 - **Form features are NaN only without history:** driver form 2.8% (career debuts; 14% of rows in the 1950s, 1% from
-  2000), constructor form and mechanical rate 1.1% (a constructor's first race).
+  2000), constructor form and mechanical rate 0.9% (223 rows: a lineage's first race; 265 rows if keyed by
+  `constructorId`, because renamed teams would restart). There are none from 2020 on.
 - **Validation and test are almost complete:** the largest gap is 5.1% (validation), the round-1 ranks."""),
 
-    md("""### 9.4 Target rate by split
+    md("""### 9.4 Target rate and field size by split
 
-The splits are by season: train ≤ 2019, validation 2020–2021, test ≥ 2022 (`config`)."""),
+The splits are by season: train ≤ 2019, validation 2020–2021, test ≥ 2022 (`config`). Every race has three podium
+places, so the base rate is roughly 3 ÷ the number of starters."""),
     code("""split_summary = (
     pd.DataFrame({"split": meta["split"], "year": meta["year"], "raceId": meta["raceId"], "podium": y})
     .groupby("split").agg(first_year=("year", "min"), last_year=("year", "max"), races=("raceId", "nunique"),
                           rows=("podium", "size"), podiums=("podium", "sum"), base_rate=("podium", "mean"))
     .reindex(list(feats.SPLITS))
 )
-display(split_summary.style.format({"base_rate": "{:.1%}"}))"""),
+split_summary["mean starters per race"] = split_summary["rows"] / split_summary["races"]
+split_summary["3 / mean starters"] = 3 / split_summary["mean starters per race"]
+display(split_summary.style.format({"base_rate": "{:.1%}", "mean starters per race": "{:.1f}",
+                                    "3 / mean starters": "{:.1%}"}))"""),
     md("""**What it shows.**
 - **Train:** 1950–2019, 1,007 races, 22,624 rows, 13.4% podium.
 - **Validation:** 2020–2021, 39 races, 780 rows, 15.0%. **Test:** 2022–2024, 68 races, 1,357 rows, 15.0%.
-- **The base rate is higher in recent seasons** because fields are smaller (about 20 cars, 3 podium places each race) than
-  in earlier decades. A model that always says "no podium" would be right 85–87% of the time, so accuracy is not a useful
-  metric here."""),
+- **Field size explains the base rate:** 22.5 starters per race in train vs 20.0 in validation and test, so 3 ÷ starters
+  is 13.4% vs 15.0%, exactly the observed base rates.
+
+> **Reading PR-AUC.** The podium class is rare, so precision-recall AUC is a natural metric, but it has no fixed
+> "chance" level like ROC-AUC's 0.5. **A model with no skill scores a PR-AUC about equal to the base rate.** That is
+> about 13% on train and 15% on validation and test, so every PR-AUC must be read against the base rate of the same
+> split. Because the base rate differs between splits (it tracks field size), PR-AUCs from different splits or eras
+> are not directly comparable. Accuracy is not useful here: always predicting "no podium" is right 85–87% of the
+> time."""),
 
     md("""### 9.5 Leakage checks
 
@@ -2024,9 +2045,11 @@ The same six checks as `tests/test_features.py`, run here on the real table:
    may change; later races must change; only R's targets change.
 3. **Standings:** `points_before` vs the standings table of the previous round.
 4. **Forbidden columns:** none of the current-race outcome columns are in X.
-5. **Prefix invariance:** race R's rows built from data up to R only are identical to the full build.
+5. **Prefix invariance:** race R's rows built from data up to R only are identical to the full build, for 30 races:
+   round 1 of several seasons, the first race after each lineage rename, the split boundaries and the last race.
 6. **Split:** disjoint, complete and ordered in time."""),
     code("""checks = {}
+prefix_sample = leakage.prefix_race_sample(meta, tables, n=30)
 
 mism, n_checked = leakage.bruteforce_mismatches(tables, results_clean, meta, X, n=200)
 checks["1 brute force (200 random rows)"] = (mism.empty, f"{n_checked} rows x {len(leakage.LAGGED_FEATURES)} lagged "
@@ -2049,11 +2072,8 @@ checks["3 standings (drivers, 1990–2024)"] = (drv_recent == 0, f"{drv_recent} 
 bad_cols = leakage.forbidden_columns(X, y)
 checks["4 forbidden columns"] = (bad_cols == [], f"forbidden columns in X: {bad_cols}")
 
-prefix = leakage.prefix_invariance_check(
-    tables, results_clean,
-    [rid(2023, 1), rid(2012, 10), rid(2021, 11), int(meta.sort_values(["year", "round"])["raceId"].iloc[-1])],
-    full=(meta, X, y))
-checks["5 prefix invariance (4 races)"] = (bool(prefix["identical"].all()),
+prefix = leakage.prefix_invariance_check(tables, results_clean, prefix_sample["raceId"].tolist(), full=(meta, X, y))
+checks[f"5 prefix invariance ({len(prefix)} races)"] = (bool(prefix["identical"].all()),
                                            f"{int(prefix['identical'].sum())} of {len(prefix)} races identical")
 
 split = leakage.split_check(meta)
@@ -2065,12 +2085,17 @@ with pd.option_context("display.max_colwidth", 140):
     display(check_table)
 assert check_table["passed"].all(), "a leakage check failed"
 
+print("races used for the prefix-invariance check:")
+with pd.option_context("display.max_colwidth", 120):
+    display(prefix_sample.merge(prefix[["raceId", "rows", "identical"]], on="raceId"))
+
 print("points_before vs previous-round standings, mismatches by decade:")
 display(standings.pivot(index="decade", columns="who", values=["mismatches", "rows"]))"""),
     md("""**What it shows.**
 - **All six checks pass** (asserted). The brute-force recomputation agrees on all 200 × 15 lagged cells. Reversing
   the 2012 round-10 results changes none of the rows up to and including that race and 240 rows afterwards. The rows of
-  4 races built from data up to that race are identical to the full build.
+  30 races built from data up to that race are identical to the full build. They cover round 1 of 8 seasons, the
+  first race after each lineage rename, the 2019/2020 and 2021/2022 split boundaries and the last race (table above).
 - **Standings, drivers:** 0 mismatches from 1990 to 2024. 2021–2024 only match because sprint points of earlier rounds are
   included. The 120 mismatches before 1990 come from the old dropped-scores rules (only a driver's best N results
   counted) and shared drives.
@@ -2082,8 +2107,9 @@ display(standings.pivot(index="decade", columns="who", values=["mismatches", "ro
     - Force India 2018, standings restarted at zero after the mid-season takeover.
     - Racing Point 2020, a 15-point penalty.
   - `con_points_before` counts the points scored on track. The test allows exactly these three cases and fails on any other.
-- **Known limitation:** constructor history follows `constructorId`, so a renamed team starts again; RB in 2024 has
-  `con_races_before` = 1 at its second race. Merging lineages (as in Q3's sensitivity) is an *Experiment* for later."""),
+- **Teammates:** constructor features are built from one row per (lineage, race), shifted before rolling. A synthetic
+  test in `tests/test_features.py` puts both teammates on the podium in round 1 and checks that none of their round-1
+  constructor features see it."""),
 ]
 
 nb = new_notebook(cells=cells)
