@@ -108,6 +108,7 @@ FORBIDDEN_CURRENT_RACE_TABLES = (
 )
 ROLLING_WINDOWS = (3, 5)                # form over the last N prior races
 MECH_WINDOW = 10                        # constructor mechanical-retirement rate over the last N prior races
+CONSTRUCTOR_KEY = "lineage"             # key for con_* features: "lineage" or "constructorId" (ablation)
 
 # Missing-value sentinel used throughout the Ergast CSVs.
 NA_VALUES = ["\\N"]

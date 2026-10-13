@@ -7,7 +7,10 @@ cumulative or rolling statistic. Nothing is imputed, scaled or encoded here: mis
 NaN and are handled later by pipelines fitted on the training data only.
 
 build_modeling_table returns (meta, X, y) with the same index:
-  meta: raceId, driverId, constructorId, year, round, split (never features)
+  meta: raceId, driverId, constructorId, constructor_key, year, round, split (never features)
+
+Constructor features (con_*) are keyed by config.CONSTRUCTOR_KEY: the team lineage by default
+(renamed or bought teams merged), or constructorId for an ablation.
   X:    the features listed in FEATURES
   y:    podium (positionOrder <= 3), kept out of X
 """
@@ -20,7 +23,8 @@ from f1podium import de_questions as de
 from f1podium.eda import PODIUM_MAX_POSITION
 
 KEY = ["raceId", "driverId"]
-META_COLUMNS = ["raceId", "driverId", "constructorId", "year", "round", "split"]
+META_COLUMNS = ["raceId", "driverId", "constructorId", "constructor_key", "year", "round", "split"]
+CONSTRUCTOR_KEYS = ("lineage", "constructorId")
 SPLIT_TRAIN, SPLIT_VAL, SPLIT_TEST = "train", "validation", "test"
 SPLITS = (SPLIT_TRAIN, SPLIT_VAL, SPLIT_TEST)
 
@@ -40,9 +44,9 @@ FEATURE_DICTIONARY = [
      "results.points, sprint_results.points", "earlier rounds only", "season to date"),
     ("drv_rank_before", "rank of drv_points_before among race R's entrants (ties share the best rank); NaN at round 1",
      "derived", "earlier rounds only", "season to date"),
-    ("con_points_before", "constructor's season points (race + sprint, all cars) from rounds before R; 0 at round 1",
+    ("con_points_before", "constructor (lineage) season points (race + sprint, all cars) from rounds before R; 0 at round 1",
      "results.points, sprint_results.points", "earlier rounds only", "season to date"),
-    ("con_rank_before", "rank of con_points_before among race R's constructors; NaN at round 1",
+    ("con_rank_before", "rank of con_points_before among race R's constructors (lineages); NaN at round 1",
      "derived", "earlier rounds only", "season to date"),
     *[(f"drv_podium_rate_last{k}", f"driver's podium share over their previous {k} starts (fewer if not available)",
        "results.positionOrder", "earlier races only", f"last {k} starts, across seasons") for k in _W],
@@ -144,16 +148,32 @@ def build_modeling_table(
     results_clean: pd.DataFrame,
     status_map: pd.DataFrame | None = None,
     nat_map: pd.DataFrame | None = None,
+    constructor_key: str = config.CONSTRUCTOR_KEY,
+    lineage: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
-    """Build (meta, X, y) from the cleaned results and the raw tables (see the module docstring)."""
+    """Build (meta, X, y) from the cleaned results and the raw tables (see the module docstring).
+
+    Every con_* feature is keyed by `constructor_key`: "lineage" (renamed or bought teams merged, from
+    reference/constructor_lineage.csv by constructorId and year) or "constructorId" (ablation). The key
+    is stored in meta["constructor_key"]; it is never a feature.
+    """
+    if constructor_key not in CONSTRUCTOR_KEYS:
+        raise ValueError(f"constructor_key must be one of {CONSTRUCTOR_KEYS}")
     status_map = de.load_status_categories() if status_map is None else status_map
     nat_map = de.load_nationality_map() if nat_map is None else nat_map
+    lineage = de.load_constructor_lineage() if lineage is None else lineage
+
+    def con_key_for(frame: pd.DataFrame) -> pd.Series:
+        if constructor_key == "constructorId":
+            return frame["constructorId"].astype("int64").astype(str)
+        return de.lineage_for(frame, lineage, tables["constructors"])
     races, qualifying, sprint = tables["races"], tables["qualifying"], tables["sprint_results"]
 
     base = chronological(results_clean, races)
     n = len(base)
     df = base[["raceId", "driverId", "constructorId", "year", "round", "grid", "positionOrder", "points",
                "statusId"]].copy()
+    df["constructor_key"] = con_key_for(df)
 
     # --- current race: grid, qualifying, static --------------------------------------------
     n_starters = df.groupby("raceId")["driverId"].transform("size")
@@ -172,7 +192,8 @@ def build_modeling_table(
 
     # --- season points before round R (race + sprint of EARLIER rounds) ---------------------
     sprint_y = sprint.merge(races[["raceId", "year", "round"]], on="raceId", how="left", validate="many_to_one")
-    for prefix, entity in (("drv", "driverId"), ("con", "constructorId")):
+    sprint_y["constructor_key"] = con_key_for(sprint_y)
+    for prefix, entity in (("drv", "driverId"), ("con", "constructor_key")):
         events = pd.concat([
             df[[entity, "year", "round", "points"]].rename(columns={"points": "pts"}),
             sprint_y[[entity, "year", "round", "points"]].rename(columns={"points": "pts"}),
@@ -182,12 +203,12 @@ def build_modeling_table(
         df = df.merge(before, on=[entity, "year", "round"], how="left", validate="many_to_one")
         _require_rows(df, n, f"join {prefix} points_before")
 
-    # Rank within race R's field (drivers; constructors ranked once per constructor).
+    # Rank within race R's field (drivers; constructors ranked once per constructor key).
     df["drv_rank_before"] = df.groupby("raceId")["drv_points_before"].rank(ascending=False, method="min")
-    con_field = df.drop_duplicates(["raceId", "constructorId"])[["raceId", "constructorId", "con_points_before"]]
+    con_field = df.drop_duplicates(["raceId", "constructor_key"])[["raceId", "constructor_key", "con_points_before"]]
     con_field = con_field.assign(con_rank_before=con_field.groupby("raceId")["con_points_before"]
                                  .rank(ascending=False, method="min"))
-    df = df.merge(con_field[["raceId", "constructorId", "con_rank_before"]], on=["raceId", "constructorId"],
+    df = df.merge(con_field[["raceId", "constructor_key", "con_rank_before"]], on=["raceId", "constructor_key"],
                   how="left", validate="many_to_one")
     _require_rows(df, n, "join con_rank_before")
     df.loc[df["round"] == 1, ["drv_rank_before", "con_rank_before"]] = np.nan
@@ -207,25 +228,27 @@ def build_modeling_table(
     df = df.merge(drv[keep], on=KEY, how="left", validate="one_to_one")
     _require_rows(df, n, "join driver form")
 
-    # --- constructor form and reliability: previous constructor races (all cars aggregated) ---
+    # --- constructor form and reliability ------------------------------------------------------
+    # Teammate safety: rows are first aggregated to ONE row per (constructor key, race), and only then
+    # shifted and rolled, so no car's result in race R (its own or a teammate's) enters race R's features.
     df = df.merge(_status_mechanical(tables["status"], status_map), on="statusId", how="left", validate="many_to_one")
     _require_rows(df, n, "join status category")
     if df["mech"].isna().any():
         raise AssertionError("some results have a statusId that is not in status")
-    con_race = (df.groupby(["constructorId", "raceId", "year", "round"], as_index=False)
+    con_race = (df.groupby(["constructor_key", "raceId", "year", "round"], as_index=False)
                 .agg(_podium=("_podium", "sum"), _pos=("_pos", "sum"), _one=("_one", "sum"), _mech=("mech", "sum")))
-    con = rolling_prior(con_race, "constructorId", ["_podium", "_pos", "_one"], _W)
-    mech = rolling_prior(con_race, "constructorId", ["_mech", "_one"], (config.MECH_WINDOW,))
+    con = rolling_prior(con_race, "constructor_key", ["_podium", "_pos", "_one"], _W)
+    mech = rolling_prior(con_race, "constructor_key", ["_mech", "_one"], (config.MECH_WINDOW,))
     for k in _W:
         con[f"con_podium_rate_last{k}"] = con[f"_podium_sum{k}"] / con[f"_one_sum{k}"]
         con[f"con_mean_pos_last{k}"] = con[f"_pos_sum{k}"] / con[f"_one_sum{k}"]
     mech[MECH_FEATURE] = mech[f"_mech_sum{config.MECH_WINDOW}"] / mech[f"_one_sum{config.MECH_WINDOW}"]
-    con = con.merge(mech[["constructorId", "raceId", MECH_FEATURE]], on=["constructorId", "raceId"],
+    con = con.merge(mech[["constructor_key", "raceId", MECH_FEATURE]], on=["constructor_key", "raceId"],
                     how="left", validate="one_to_one")
     con = con.rename(columns={"races_before": "con_races_before"})
-    keep = ["constructorId", "raceId", "con_races_before", MECH_FEATURE] + [
+    keep = ["constructor_key", "raceId", "con_races_before", MECH_FEATURE] + [
         c for c in con.columns if c.startswith(("con_podium", "con_mean"))]
-    df = df.merge(con[keep], on=["constructorId", "raceId"], how="left", validate="many_to_one")
+    df = df.merge(con[keep], on=["constructor_key", "raceId"], how="left", validate="many_to_one")
     _require_rows(df, n, "join constructor form")
 
     df = df.sort_values(["year", "round", "driverId"], kind="stable").reset_index(drop=True)

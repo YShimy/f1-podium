@@ -27,16 +27,28 @@ def _order(year, rnd):
 
 
 def bruteforce_features(tables: dict, results_clean: pd.DataFrame, rows: pd.DataFrame,
-                        status_map: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Naive recomputation of LAGGED_FEATURES for `rows` (columns raceId, driverId, constructorId, year, round)."""
+                        status_map: pd.DataFrame | None = None,
+                        constructor_key: str = config.CONSTRUCTOR_KEY) -> pd.DataFrame:
+    """Naive recomputation of LAGGED_FEATURES for `rows` (columns raceId, driverId, constructor_key, year, round).
+
+    Constructor features are grouped by the same key as the build (lineage or constructorId).
+    """
     status_map = de.load_status_categories() if status_map is None else status_map
+    lineage = de.load_constructor_lineage()
+
+    def key(frame):
+        if constructor_key == "constructorId":
+            return frame["constructorId"].astype("int64").astype(str)
+        return de.lineage_for(frame, lineage, tables["constructors"])
     races = tables["races"][["raceId", "year", "round"]]
     res = results_clean.merge(races, on="raceId", how="left")
     res["ord"] = _order(res["year"], res["round"])
     res["podium"] = (res["positionOrder"] <= PODIUM_MAX_POSITION).astype(float)
     cat = tables["status"].merge(status_map, on="status", how="left").set_index("statusId")["category"]
     res["mech"] = (res["statusId"].map(cat) == de.MECHANICAL).astype(float)
+    res["ckey"] = key(res)
     spr = tables["sprint_results"].merge(races, on="raceId", how="left")
+    spr["ckey"] = key(spr)
 
     def points_before(entity, ident, year, rnd):
         r = res[(res[entity] == ident) & (res["year"] == year) & (res["round"] < rnd)]["points"].astype(float).sum()
@@ -56,13 +68,13 @@ def bruteforce_features(tables: dict, results_clean: pd.DataFrame, rows: pd.Data
         earlier = res[res["ord"] < o]
         rec = {"raceId": r.raceId, "driverId": r.driverId}
         rec["drv_points_before"] = points_before("driverId", r.driverId, r.year, r.round)
-        rec["con_points_before"] = points_before("constructorId", r.constructorId, r.year, r.round)
+        rec["con_points_before"] = points_before("ckey", r.constructor_key, r.year, r.round)
         rec["drv_rank_before"] = rank_in_field("driverId", r.driverId, r.raceId, r.year, r.round)
-        rec["con_rank_before"] = rank_in_field("constructorId", r.constructorId, r.raceId, r.year, r.round)
+        rec["con_rank_before"] = rank_in_field("ckey", r.constructor_key, r.raceId, r.year, r.round)
 
         d = earlier[earlier["driverId"] == r.driverId].sort_values("ord")
         rec["drv_races_before"] = len(d)
-        c = earlier[earlier["constructorId"] == r.constructorId]
+        c = earlier[earlier["ckey"] == r.constructor_key]
         c_races = c.drop_duplicates("raceId").sort_values("ord")["raceId"].tolist()
         rec["con_races_before"] = len(c_races)
         for k in config.ROLLING_WINDOWS:
@@ -79,10 +91,11 @@ def bruteforce_features(tables: dict, results_clean: pd.DataFrame, rows: pd.Data
 
 
 def bruteforce_mismatches(tables, results_clean, meta, X, n: int = 200, seed: int = config.RANDOM_SEED,
-                          rows_idx=None) -> tuple[pd.DataFrame, int]:
+                          rows_idx=None, constructor_key: str = config.CONSTRUCTOR_KEY) -> tuple[pd.DataFrame, int]:
     """(mismatching cells, number of rows checked) for a random sample of rows."""
     idx = meta.sample(n=min(n, len(meta)), random_state=seed).index if rows_idx is None else rows_idx
-    naive = bruteforce_features(tables, results_clean, meta.loc[idx]).set_index(["raceId", "driverId"])
+    naive = bruteforce_features(tables, results_clean, meta.loc[idx],
+                                constructor_key=constructor_key).set_index(["raceId", "driverId"])
     built = pd.concat([meta.loc[idx, ["raceId", "driverId"]], X.loc[idx, LAGGED_FEATURES]], axis=1) \
         .set_index(["raceId", "driverId"])
     naive = naive.loc[built.index, LAGGED_FEATURES].astype(float)

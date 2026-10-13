@@ -58,6 +58,70 @@ def test_assign_split_uses_config_years():
     assert F.assign_split(years).tolist() == ["train", "train", "validation", "validation", "test", "test"]
 
 
+def synthetic_tables():
+    """One season, raceIds deliberately non-chronological (30 = round 1, 10 = round 2, 20 = round 3).
+
+    Constructor 7 ("Gamma") runs drivers 1 and 2; constructor 8 ("Delta") runs drivers 3 and 4.
+    """
+    rows = [  # raceId, driverId, constructorId, grid, positionOrder, points, statusId
+        (30, 1, 7, 1, 1, 10, 1), (30, 2, 7, 2, 2, 6, 1), (30, 3, 8, 3, 3, 4, 1), (30, 4, 8, 4, 4, 3, 2),
+        (10, 1, 7, 1, 3, 4, 1), (10, 2, 7, 2, 1, 10, 1), (10, 3, 8, 3, 2, 6, 1), (10, 4, 8, 4, 4, 3, 1),
+        (20, 1, 7, 1, 1, 10, 1), (20, 2, 7, 2, 2, 6, 1), (20, 3, 8, 3, 3, 4, 1), (20, 4, 8, 4, 4, 3, 1),
+    ]
+    rc = pd.DataFrame(rows, columns=["raceId", "driverId", "constructorId", "grid", "positionOrder", "points",
+                                     "statusId"]).astype("Int64")
+    tables = {
+        "races": pd.DataFrame({"raceId": [30, 10, 20], "year": [2000] * 3, "round": [1, 2, 3],
+                               "circuitId": [1] * 3}).astype("Int64"),
+        "qualifying": rc[["raceId", "driverId", "grid"]].rename(columns={"grid": "position"}),
+        "sprint_results": pd.DataFrame({c: pd.array([], dtype="Int64")
+                                        for c in ["raceId", "driverId", "constructorId", "points"]}),
+        "circuits": pd.DataFrame({"circuitId": pd.array([1], dtype="Int64"), "country": ["UK"]}),
+        "drivers": pd.DataFrame({"driverId": pd.array([1, 2, 3, 4], dtype="Int64"), "nationality": ["British"] * 4}),
+        "constructors": pd.DataFrame({"constructorId": pd.array([7, 8], dtype="Int64"), "name": ["Gamma", "Delta"]}),
+        "status": pd.DataFrame({"statusId": pd.array([1, 2], dtype="Int64"), "status": ["Finished", "Engine"]}),
+    }
+    nat_map = pd.DataFrame({"nationality": ["British"], "country": ["UK"], "note": [""]})
+    return tables, rc, nat_map
+
+
+def synthetic_build(tables, rc, nat_map, key):
+    meta, X, _ = F.build_modeling_table(tables, rc, nat_map=nat_map, constructor_key=key)
+    return pd.concat([meta, X], axis=1).set_index(["round", "driverId"])
+
+
+@pytest.mark.parametrize("key", F.CONSTRUCTOR_KEYS)
+def test_teammate_results_in_the_same_race_never_enter_constructor_features(key):
+    tables, rc, nat_map = synthetic_tables()
+    d = synthetic_build(tables, rc, nat_map, key)
+    con_form = [c for c in F.FEATURES if c.startswith("con_") and c not in ("con_points_before", "con_rank_before",
+                                                                            "con_races_before")]
+    # Round 1: both Gamma cars finished on the podium in this race, yet no constructor feature sees it.
+    for drv in (1, 2):
+        assert d.loc[(1, drv), con_form].isna().all()
+        assert d.loc[(1, drv), "con_points_before"] == 0 and d.loc[(1, drv), "con_races_before"] == 0
+    # Round 2: only round 1 counts (2 podiums from 2 starts; positions 1 and 2; 16 points).
+    for drv in (1, 2):
+        assert d.loc[(2, drv), "con_podium_rate_last3"] == 1.0
+        assert d.loc[(2, drv), "con_mean_pos_last3"] == 1.5
+        assert d.loc[(2, drv), "con_points_before"] == 16
+        assert d.loc[(2, drv), "con_races_before"] == 1
+        assert d.loc[(2, drv), F.MECH_FEATURE] == 0.0
+    assert d.loc[(2, 3), F.MECH_FEATURE] == 0.5          # Delta: driver 4's engine failure in round 1
+
+    # Change round 2: Gamma's winner (driver 2) and Delta's driver 4 swap results.
+    pert = rc.copy()
+    a = (pert["raceId"] == 10) & (pert["driverId"] == 2)
+    b = (pert["raceId"] == 10) & (pert["driverId"] == 4)
+    for col in ("positionOrder", "points", "statusId"):
+        va, vb = pert.loc[a, col].iloc[0], pert.loc[b, col].iloc[0]
+        pert.loc[a, col], pert.loc[b, col] = vb, va
+    d2 = synthetic_build(tables, pert, nat_map, key)
+    feats = F.FEATURES
+    assert d.loc[[1, 2], feats].equals(d2.loc[[1, 2], feats])             # rounds 1-2 unchanged
+    assert d.loc[(3, 1), "con_podium_rate_last3"] != d2.loc[(3, 1), "con_podium_rate_last3"]  # round 3 sees it
+
+
 def test_feature_dictionary_matches_features_and_avoids_forbidden_names():
     fd = F.feature_dictionary()
     assert fd.index.tolist() == F.FEATURES and fd.index.is_unique
@@ -99,6 +163,44 @@ def test_1_bruteforce_recomputation_of_200_random_rows(real):
     mism, n = L.bruteforce_mismatches(tables, rc, meta, X, n=200)
     assert n == 200
     assert mism.empty, mism.head(20)
+
+
+@pytest.mark.skipif(not RAW_PRESENT, reason="raw data not available")
+def test_1_bruteforce_constructor_id_ablation(real):
+    tables, rc, *_ = real
+    meta, X, _ = F.build_modeling_table(tables, rc, constructor_key="constructorId")
+    mism, n = L.bruteforce_mismatches(tables, rc, meta, X, n=40, constructor_key="constructorId")
+    assert n == 40 and mism.empty, mism.head(20)
+
+
+def first_race_row(meta, X, tables, year, name):
+    cid = int(tables["constructors"].set_index("name")["constructorId"][name])
+    d = pd.concat([meta, X], axis=1)
+    return d[(d["year"] == year) & (d["constructorId"] == cid)].sort_values("round").iloc[0]
+
+
+@pytest.mark.skipif(not RAW_PRESENT, reason="raw data not available")
+@pytest.mark.parametrize("year, name, members", [
+    (2024, "RB F1 Team", {"minardi", "toro_rosso", "alphatauri"}),
+    (2021, "Alpine F1 Team", {"toleman", "benetton", "renault", "lotus_f1"}),
+    (2021, "Aston Martin", {"jordan", "mf1", "spyker_mf1", "spyker", "force_india", "racing_point"}),
+])
+def test_lineage_history_continues_across_renames(real, year, name, members):
+    tables, rc, meta, X, _ = real
+    row = first_race_row(meta, X, tables, year, name)
+    refs = tables["constructors"].set_index("constructorId")["constructorRef"]
+    r = rc.merge(tables["races"][["raceId", "year", "round"]], on="raceId")
+    earlier = r[(r["year"] < year) & r["constructorId"].map(refs).isin(members)]
+    if "renault" in members:                                  # the 1977-85 Renault works team is not Enstone
+        earlier = earlier[~((earlier["constructorId"].map(refs) == "renault") & (earlier["year"] <= 1985))]
+    assert row["con_races_before"] == earlier["raceId"].nunique() > 0
+
+    # Ablation (constructorId): history is whatever that id had before -- 0 for RB and Alpine; for Aston
+    # Martin the 5 races of the unrelated 1959-60 team, because Ergast reuses id 117.
+    meta_id, X_id, _ = F.build_modeling_table(tables, rc, constructor_key="constructorId")
+    row_id = first_race_row(meta_id, X_id, tables, year, name)
+    same_id = r[(r["year"] < year) & (r["constructorId"] == row_id["constructorId"])]
+    assert row_id["con_races_before"] == same_id["raceId"].nunique() < row["con_races_before"]
 
 
 @pytest.mark.skipif(not RAW_PRESENT, reason="raw data not available")
