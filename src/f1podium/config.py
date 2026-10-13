@@ -95,6 +95,20 @@ Q2_RECENT_START_YEAR = 2003             # sensitivity (b): seasons from this yea
 Q3_ERAS = (("2014–2021", 2014, 2021), ("2022–2024", 2022, 2024))
 Q3_MIN_STARTS = 40                      # minimum starts per constructor-era (about one season, two cars)
 
+# Modeling table. Columns that are only known after the race: never features for the CURRENT race.
+FORBIDDEN_CURRENT_RACE_COLUMNS = (
+    "position", "positionText", "positionOrder", "points", "laps", "time", "milliseconds",
+    "fastestLap", "rank", "fastestLapTime", "fastestLapSpeed", "statusId", "status",
+)
+# Tables whose rows for the current raceId must never feed a feature (standings are cumulative AFTER
+# the race; the current round's sprint is also excluded).
+FORBIDDEN_CURRENT_RACE_TABLES = (
+    "lap_times", "pit_stops", "constructor_results", "driver_standings", "constructor_standings",
+    "sprint_results",
+)
+ROLLING_WINDOWS = (3, 5)                # form over the last N prior races
+MECH_WINDOW = 10                        # constructor mechanical-retirement rate over the last N prior races
+
 # Missing-value sentinel used throughout the Ergast CSVs.
 NA_VALUES = ["\\N"]
 
