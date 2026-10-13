@@ -41,7 +41,7 @@ Goal: for each driver in each race, predict whether they finish on the podium
 
 Sections: **1** Setup, **2** Data Loading, **3** Raw Data Audit, **4** Audit follow-ups,
 **5** Findings → open decisions, **6** Cleaning, **7** Post-cleaning EDA, **8** Data-engineering questions,
-**9** Modeling table. Sections 3–4 only *measure* the raw data;
+**9** Modeling table, **10** Evaluation harness and baselines. Sections 3–4 only *measure* the raw data;
 cleaning happens only in section 6, following decisions recorded in the notebook.
 Reusable code lives in `src/f1podium/`."""),
 
@@ -2110,6 +2110,98 @@ display(standings.pivot(index="decade", columns="who", values=["mismatches", "ro
 - **Teammates:** constructor features are built from one row per (lineage, race), shifted before rolling. A synthetic
   test in `tests/test_features.py` puts both teammates on the podium in round 1 and checks that none of their round-1
   constructor features see it."""),
+
+    md("""## 10. Evaluation harness and baselines (validation only)
+
+**Protocol** (code: `src/f1podium/evaluation.py`, `src/f1podium/models.py`):
+- **Fit on train only:** seasons `config.TRAIN_START_YEAR`–`TRAIN_END_YEAR` (1950–2019). Preprocessing is inside the
+  sklearn pipeline, so the imputer and scaler only ever see training rows (a unit test checks the imputer's medians).
+- **Every choice is made on validation (2020–2021):** model comparison and the decision threshold (the F1-optimal
+  threshold on validation, rule `score >= threshold`, ties to the higher threshold). Nothing is tuned yet.
+- **Test (2022–2024) is locked.** It is scored only by `final_test_report`, once per model name, which logs every run to
+  `results/final_test.csv` with race-level bootstrap 95% CIs. **It is not called in this notebook.**
+  `split_rows(meta, "test")` raises, so the development helpers cannot touch test rows.
+
+**Baselines**
+- **naive: −grid:** score = −`grid_filled`. Nothing is learned.
+- **naive: −quali (fallback −grid):** score = −`quali_position` when the driver has a qualifying position,
+  **otherwise −`grid_filled`**. The fallback is used for 63% of training rows (no qualifying data before 1994,
+  patchy until 2002), 0.1% of validation rows and no test rows.
+- **logistic regression:** median imputation (fitted on train; the missing-value flags already exist) → standardisation
+  → `LogisticRegression(solver="lbfgs", penalty="l2", C=1.0, max_iter=1000, class_weight=None)`. Default settings,
+  not tuned. All 21 features."""),
+    code("""from f1podium import evaluation as ev
+from f1podium import models as mdl
+
+final_test_path = config.RESULTS_DIR / ev.FINAL_TEST_FILE
+def _file_state(path):
+    return path.stat().st_mtime_ns if path.exists() else None
+test_log_before = _file_state(final_test_path)
+
+val_rows, fitted = [], {}
+for name, model in mdl.baseline_models().items():
+    row, fitted[name] = ev.evaluate_on_validation(name, model, meta, X, y)
+    val_rows.append(row)
+val_table = pd.DataFrame(val_rows).set_index("model")[
+    ["n", "base_rate", "pr_auc", "pr_auc_over_base_rate", "roc_auc", "threshold", "precision", "recall", "f1",
+     "predicted_positive_share"]]
+assert val_table["n"].nunique() == 1 and (val_table["n"] == len(ev.split_rows(meta, "validation"))).all()
+assert _file_state(final_test_path) == test_log_before, "this section must not write test results"
+display(val_table.style.format({"base_rate": "{:.1%}", "pr_auc": "{:.3f}", "pr_auc_over_base_rate": "{:.2f}x",
+                                "roc_auc": "{:.3f}", "threshold": "{:.3f}", "precision": "{:.3f}",
+                                "recall": "{:.3f}", "f1": "{:.3f}", "predicted_positive_share": "{:.1%}"}))"""),
+    md("""**What it shows.**
+- **All three models rank far better than chance.** PR-AUC is 0.639 (−grid), 0.654 (−quali) and 0.726 (logistic
+  regression), against a base rate of 0.150: 4.3×, 4.4× and 4.8× the no-skill level. ROC-AUC is 0.909, 0.920 and 0.927.
+- **Qualifying order beats grid order slightly** (+0.015 PR-AUC). Grid penalties move cars away from where their pace put
+  them.
+- **Logistic regression adds the most:** +0.072 PR-AUC over the qualifying rule, and +0.007 ROC-AUC. These are
+  single-split numbers with no interval yet, so small gaps should not be over-read.
+- **Thresholds:** for both rules the F1-optimal threshold is −3, i.e. "predict a podium for P1–P3". That gives precision =
+  recall = 0.692 (81 of 117 podiums). Logistic regression's threshold is a probability of 0.276. It predicts 18.6% of rows
+  as podium and trades precision (0.634) for recall (0.786), for F1 0.702.
+
+> **Read PR-AUC against the base rate** (15.0% on validation): a model with no skill scores about 0.15, not 0.5.
+> **Validation F1 is optimistic:** the threshold was chosen on these same rows. The honest F1 comes from applying the
+> frozen threshold to test, later, once."""),
+
+    md("""### 10.2 Logistic-regression coefficients
+
+Coefficients on **standardised** features: each is the change in log-odds of a podium for a one-standard-deviation
+increase in that feature (standard deviations from the training rows), holding the other features fixed."""),
+    code("""lr = fitted["logistic regression"]
+coef = pd.Series(lr.named_steps["clf"].coef_[0], index=lr.named_steps["prep"].get_feature_names_out(), name="coef")
+coef_table = pd.DataFrame({"coef": coef, "odds ratio per SD": np.exp(coef)}).reindex(
+    coef.abs().sort_values(ascending=False).index)
+print("intercept:", round(float(lr.named_steps["clf"].intercept_[0]), 3),
+      "| iterations:", int(lr.named_steps["clf"].n_iter_[0]))
+display(coef_table.round(3))
+
+fig, ax = plots.new_figure(height=6.2)
+order = coef_table.index[::-1]
+ax.barh(range(len(order)), coef_table.loc[order, "coef"],
+        color=[plots.SERIES[0] if v > 0 else plots.SERIES[1] for v in coef_table.loc[order, "coef"]])
+ax.axvline(0, color=plots.INK_MUTED, linewidth=1)
+ax.set_yticks(range(len(order)))
+ax.set_yticklabels(order)
+plots.style_axes(ax, "Logistic regression: standardised coefficients", xlabel="log-odds per 1 SD (train)")
+fig.tight_layout()
+plt.show()"""),
+    md("""**What it shows.**
+- **Starting position dominates:** `grid_filled` −1.47 (odds × 0.23 per standard deviation, about 7 grid places in
+  training), far ahead of everything else. `quali_position` (−0.29) adds a little on top of the grid.
+- **Season standing comes next:** constructor rank −0.30 and driver rank −0.24 (a better, i.e. lower, rank goes with
+  more podiums). Driver points +0.19 and recent driver form (podium rate over the last 5 starts, +0.15) also count.
+- **Some signs look odd, and that is expected with correlated inputs:** `con_points_before` is −0.16 although
+  constructor rank already points the other way, and `con_mech_rate_last10` is slightly positive (+0.04).
+  `has_quali` (−0.31) and `is_round_1` (+0.12) mostly correct for how missing values were imputed (median quali
+  position before 1994; median rank at round 1). They are not effects of their own.
+- **`is_home` is about 0 (−0.005)**, in line with Q2.
+
+> **Coefficients are associations, not causes.** They describe how the fitted model weighs each feature given all the
+> others. Many features are strongly correlated (grid and qualifying position; points and rank; last-3 and last-5
+> form), so they share weight between them. A single coefficient's size or even sign can change when a correlated
+> feature is added or removed, and a small coefficient does not mean the feature is unimportant on its own."""),
 ]
 
 nb = new_notebook(cells=cells)
