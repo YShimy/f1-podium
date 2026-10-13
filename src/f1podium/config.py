@@ -72,12 +72,31 @@ def find_raw_dir(kaggle_input: Path = KAGGLE_INPUT, default: Path | None = None)
 RAW_DIR = find_raw_dir()
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 
-# Chronological split by races.year.
+
+def find_results_dir(kaggle_working: Path = Path("/kaggle/working")) -> Path:
+    """Where evaluation results are written.
+
+    Order: F1_RESULTS_DIR environment variable; /kaggle/working/results on Kaggle (the input
+    folders there are read-only); otherwise results/ in the repo.
+    """
+    env_dir = os.environ.get("F1_RESULTS_DIR")
+    if env_dir:
+        return Path(env_dir)
+    if kaggle_working.exists():
+        return kaggle_working / "results"
+    return PROJECT_ROOT / "results"
+
+
+RESULTS_DIR = find_results_dir()
+
+# Chronological split by races.year. The model is fitted on TRAIN_START_YEAR..TRAIN_END_YEAR only.
+TRAIN_START_YEAR = 1950
 TRAIN_END_YEAR = 2019
 VAL_YEARS = (2020, 2021)
 TEST_START_YEAR = 2022
 
 RANDOM_SEED = 42
+BOOTSTRAP_B = 1000                      # race-level bootstrap resamples (seed: RANDOM_SEED)
 
 # Data-engineering questions (descriptive analyses of race outcomes; not model features).
 DE_WINDOW = (2003, 2024)          # primary window: seasons with near-complete qualifying data
