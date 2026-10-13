@@ -105,6 +105,11 @@ HGB_GRID = {"learning_rate": (0.03, 0.1), "max_iter": (100, 300), "max_depth": (
             "l2_regularization": (0.0, 1.0)}
 CLASS_WEIGHTS = (None, "balanced")      # compared once per model at its chosen grid configuration
 
+# Shallow neural network (PyTorch, CPU). Grid chosen on VALIDATION PR-AUC; the rest is fixed.
+NN_GRID = {"hidden_sizes": ((32,), (64,), (64, 32)), "dropout": (0.0, 0.3),
+           "weight_decay": (0.0, 1e-3), "lr": (1e-3, 3e-3)}
+NN_FIXED = {"batch_size": 256, "max_epochs": 100, "patience": 10, "seed": RANDOM_SEED}
+
 # Data-engineering questions (descriptive analyses of race outcomes; not model features).
 DE_WINDOW = (2003, 2024)          # primary window: seasons with near-complete qualifying data
 DE_ERA_SPLIT_YEAR = 2014          # eras: <= 2013 vs >= 2014

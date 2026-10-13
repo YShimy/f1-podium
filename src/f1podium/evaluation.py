@@ -35,8 +35,15 @@ def split_rows(meta: pd.DataFrame, split: str) -> pd.Index:
 
 
 def fit_on_train(model, meta: pd.DataFrame, X: pd.DataFrame, y: pd.Series):
-    """Fit `model` (in place) on training rows only and return it."""
+    """Fit `model` (in place) on training rows only and return it.
+
+    A model that sets `uses_validation_for_early_stopping = True` (the neural network) also receives
+    the VALIDATION rows as `eval_set`, to monitor for early stopping. The test split is never passed.
+    """
     rows = split_rows(meta, SPLIT_TRAIN)
+    if getattr(model, "uses_validation_for_early_stopping", False):
+        vrows = split_rows(meta, SPLIT_VAL)
+        return model.fit(X.loc[rows], y.loc[rows], eval_set=(X.loc[vrows], y.loc[vrows]))
     return model.fit(X.loc[rows], y.loc[rows])
 
 
@@ -71,7 +78,8 @@ def threshold_metrics(y, s, threshold: float) -> dict:
     precision = tp / pred.sum() if pred.sum() else 0.0
     recall = tp / y.sum() if y.sum() else 0.0
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
-    return {"precision": precision, "recall": recall, "f1": f1, "predicted_positive_share": float(pred.mean())}
+    return {"precision": precision, "recall": recall, "f1": f1, "predicted_positive_share": float(pred.mean()),
+            "tp": tp, "fp": int((pred & ~y).sum()), "fn": int((~pred & y).sum()), "tn": int((~pred & ~y).sum())}
 
 
 def evaluate_on_validation(name: str, model, meta: pd.DataFrame, X: pd.DataFrame, y: pd.Series) -> tuple[dict, object]:
@@ -109,6 +117,8 @@ def evaluate_train_val(name: str, model, meta: pd.DataFrame, X: pd.DataFrame, y:
         out.update({f"{tag}_{k}": v for k, v in m.items()})
     for k in ("pr_auc", "roc_auc", "f1"):
         out[f"gap_{k}"] = out[f"train_{k}"] - out[f"val_{k}"]
+    if hasattr(model, "best_epoch_"):                       # early-stopped models
+        out["best_epoch"], out["epochs_run"] = int(model.best_epoch_), int(len(model.history_))
     return out, model, sv
 
 
