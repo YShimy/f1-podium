@@ -244,3 +244,10 @@ def test_train_val_gap_columns():
     assert row["gap_pr_auc"] == pytest.approx(row["train_pr_auc"] - row["val_pr_auc"])
     assert row["val_n"] == len(s) == int((meta["split"] == "validation").sum())
     assert row["val_base_rate"] == pytest.approx(float(y[meta["split"] == "validation"].mean()))
+
+
+def test_logistic_baseline_params_override_only_what_is_given():
+    default = M.logistic_baseline().named_steps["clf"]
+    balanced = M.logistic_baseline(class_weight="balanced").named_steps["clf"]
+    assert default.class_weight is None and balanced.class_weight == "balanced"
+    assert (balanced.C, balanced.max_iter, balanced.solver) == (default.C, default.max_iter, default.solver)

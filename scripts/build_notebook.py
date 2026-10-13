@@ -41,7 +41,8 @@ Goal: for each driver in each race, predict whether they finish on the podium
 
 Sections: **1** Setup, **2** Data Loading, **3** Raw Data Audit, **4** Audit follow-ups,
 **5** Findings → open decisions, **6** Cleaning, **7** Post-cleaning EDA, **8** Data-engineering questions,
-**9** Modeling table, **10** Evaluation harness and baselines. Sections 3–4 only *measure* the raw data;
+**9** Modeling table, **10** Evaluation harness and baselines, **11** Tree models and model comparison.
+Sections 3–4 only *measure* the raw data;
 cleaning happens only in section 6, following decisions recorded in the notebook.
 Reusable code lives in `src/f1podium/`."""),
 
@@ -2202,6 +2203,229 @@ plt.show()"""),
 > others. Many features are strongly correlated (grid and qualifying position; points and rank; last-3 and last-5
 > form), so they share weight between them. A single coefficient's size or even sign can change when a correlated
 > feature is added or removed, and a small coefficient does not mean the feature is unimportant on its own."""),
+
+    md("""## 11. Tree models and model comparison (validation only)
+
+Random forest and histogram gradient boosting, on **the same modeling table, features and split** as the baselines.
+**The test split is not used** (`final_test_report` is not called; the grid search reads train and validation rows only).
+
+**Preprocessing:** the same `ColumnTransformer` as logistic regression (median imputation fitted on train rows), with
+**no scaler** because trees are insensitive to feature scale. HistGradientBoosting handles NaN natively, so the imputation
+is irrelevant to it; it is kept identical so that every model sees exactly the same inputs.
+
+**Hyperparameters are chosen on validation only**, from small stated grids (`config.RF_GRID`, `config.HGB_GRID`), seed 42:
+the chosen variant has the highest **validation PR-AUC** (ties: the earlier variant). Each variant also shows its F1 at
+its own validation-tuned threshold, and its train PR-AUC and the train − validation gap (an overfitting check).
+
+> **Two cautions.** (1) With 16–18 variants per model, the best validation score is a *maximum* and so slightly
+> optimistic; the test split will be the unbiased check, later and once. (2) The train − validation gap is confounded
+> with the era: training covers 1950–2019 (smaller fields of different quality, qualifying data missing before 1994),
+> validation 2020–2021 only. A negative gap means "validation is easier than train", not "no overfitting"; a large
+> positive gap does mean memorisation."""),
+
+    md("""### 11.1 Random forest: grid on validation
+
+Grid: `n_estimators` ∈ {200, 500}, `max_depth` ∈ {6, 12, None}, `min_samples_leaf` ∈ {1, 5, 20} (18 variants),
+`class_weight=None` for now; single-threaded so results are bit-identical between runs."""),
+    code("""from sklearn.metrics import precision_recall_curve, roc_curve
+
+def grid_view(tab):
+    pcols = [c for c in tab.columns if c.startswith("param_")]
+    v = tab[pcols + ["val_pr_auc", "val_roc_auc", "val_f1", "val_precision", "val_recall", "threshold",
+                     "train_pr_auc", "gap_pr_auc"]].copy()
+    for c in pcols:
+        v[c] = [("None" if pd.isna(x) else f"{x:g}") for x in v[c]]
+    v.insert(0, "chosen", np.where(tab["chosen"], "◄ chosen", ""))
+    v.columns = [c.replace("param_", "") for c in v.columns]
+    return v
+
+def show_grid(tab):
+    v = grid_view(tab)
+    fmt = {c: "{:.3f}" for c in ["val_pr_auc", "val_roc_auc", "val_f1", "val_precision", "val_recall", "threshold",
+                                 "train_pr_auc", "gap_pr_auc"]}
+    display(v.style.format(fmt).apply(lambda r: ["font-weight: bold" if r["chosen"] else "" for _ in r], axis=1))
+
+val_base = float(y.loc[ev.split_rows(meta, "validation")].mean())
+rf_table, rf_best = ev.tune_on_validation("random forest", mdl.random_forest, config.RF_GRID, meta, X, y)
+print(f"validation base rate (PR-AUC chance level): {val_base:.3f}")
+print("chosen:", rf_best)
+show_grid(rf_table)"""),
+    md("""**What it shows.**
+- **Chosen: 500 trees, `max_depth` 12, `min_samples_leaf` 20.** Validation PR-AUC 0.719 (base rate 0.150), ROC-AUC
+  0.930, F1 0.702 at its own threshold of 0.288. Across all 18 variants PR-AUC ranges from 0.668 to 0.719.
+- **`min_samples_leaf` matters most.** A leaf of 20 beats a leaf of 1 in all six (trees × depth) pairs, by 0.008 to 0.047
+  PR-AUC. Unrestricted trees (leaf 1, depth 12 or None) fit the training rows almost perfectly (train PR-AUC 0.92–1.00,
+  gap +0.25 to +0.32) and generalise worse (0.668–0.685). The chosen configuration has a gap of −0.033.
+- **200 vs 500 trees changes PR-AUC by at most 0.008**, in either direction, so the forest size is not important here.
+- **F1 at each variant's own threshold barely moves** (0.698–0.717). It is a much coarser measure than PR-AUC, which
+  is why PR-AUC is the selection criterion."""),
+
+    md("""### 11.2 HistGradientBoosting: grid on validation
+
+Grid: `learning_rate` ∈ {0.03, 0.1}, `max_iter` ∈ {100, 300}, `max_depth` ∈ {3, 6}, `l2_regularization` ∈ {0, 1}
+(16 variants), `class_weight=None`, no early stopping (so nothing is split off the training rows)."""),
+    code("""hgb_table, hgb_best = ev.tune_on_validation("hist gradient boosting", mdl.hist_gradient_boosting,
+                                            config.HGB_GRID, meta, X, y)
+print(f"validation base rate (PR-AUC chance level): {val_base:.3f}")
+print("chosen:", hgb_best)
+show_grid(hgb_table)"""),
+    md("""**What it shows.**
+- **Chosen: learning rate 0.03, 300 iterations, `max_depth` 3, L2 = 0.** Validation PR-AUC 0.727, ROC-AUC 0.929, F1
+  0.710 at a threshold of 0.287. The 16 variants range from 0.641 to 0.727.
+- **Shallow trees win:** depth 3 beats depth 6 in all eight (learning rate × iterations × L2) pairs, by 0.010 to 0.065.
+- **Fast, deep and long overfits:** learning rate 0.1 with 300 iterations and depth 6 reaches train PR-AUC 0.90–0.92
+  (gap +0.26 to +0.27) and the worst validation PR-AUC (0.641–0.644).
+- **L2 = 1 helps the deeper models** (0.697 → 0.716, 0.678 → 0.694) **but makes no real difference at depth 3** (within
+  0.003). The six best variants all have depth 3 and lie within 0.718–0.727, a spread the validation set cannot
+  resolve."""),
+
+    md("""### 11.3 `class_weight`: balanced vs None
+
+One comparison per model, at its chosen configuration. `balanced` re-weights the classes by inverse frequency, which
+changes the probabilities (so the F1 threshold is re-tuned on validation for each variant). The class weight is chosen
+by validation PR-AUC for the tree models. Logistic regression stays at `class_weight=None` as specified earlier; its
+`balanced` row is shown for comparison only."""),
+    code("""cw_specs = {
+    "logistic regression": (mdl.logistic_baseline, {}),
+    "random forest": (mdl.random_forest, rf_best),
+    "hist gradient boosting": (mdl.hist_gradient_boosting, hgb_best),
+}
+cw_rows, final_params = [], {}
+for model_name, (make, params) in cw_specs.items():
+    best = None
+    for cw in config.CLASS_WEIGHTS:
+        row, _, _ = ev.evaluate_train_val(model_name, make(**params, class_weight=cw), meta, X, y)
+        cw_rows.append({"model": model_name, "class_weight": str(cw), **{k: row[k] for k in (
+            "val_pr_auc", "val_roc_auc", "val_f1", "val_precision", "val_recall", "threshold", "train_pr_auc",
+            "gap_pr_auc")}})
+        if best is None or row["val_pr_auc"] > best[0]:
+            best = (row["val_pr_auc"], cw)
+    chosen_cw = None if model_name == "logistic regression" else best[1]
+    final_params[model_name] = {**params, "class_weight": chosen_cw}
+cw_table = pd.DataFrame(cw_rows).set_index(["model", "class_weight"])
+display(cw_table.style.format("{:.3f}"))
+print("final configurations:")
+for k, v in final_params.items():
+    print(f"  {k}: {v}")"""),
+    md("""**What it shows.**
+- **`balanced` lowers validation PR-AUC for all three models:** logistic regression 0.726 → 0.722, random forest
+  0.719 → 0.703, gradient boosting 0.727 → 0.706. ROC-AUC moves by at most 0.005 and F1 by at most 0.003.
+- **What it does change is the probability scale:** the F1-optimal threshold jumps from about 0.28 to 0.66–0.81, because
+  re-weighting inflates the predicted probabilities. It does not improve the ranking.
+- **Chosen: `class_weight=None` for all three.** The comparison is one more selection step on the validation set, so it
+  adds slightly to the optimism noted above."""),
+
+    md("""### 11.4 All models: train and validation at the frozen validation threshold
+
+Every model is fitted on train rows only. The threshold is the F1-optimal one on **validation**, frozen, then applied
+to both train and validation. The base rate is shown beside every PR-AUC (it differs between train and validation, so
+compare PR-AUC ÷ base rate as well). The last block is the overfitting check, train minus validation."""),
+    code("""final_models = {
+    "naive: -grid": mdl.GridBaseline(),
+    "naive: -quali (fallback -grid)": mdl.QualiBaseline(),
+    "logistic regression": mdl.logistic_baseline(**final_params["logistic regression"]),
+    "random forest": mdl.random_forest(**final_params["random forest"]),
+    "hist gradient boosting": mdl.hist_gradient_boosting(**final_params["hist gradient boosting"]),
+}
+cmp_rows, val_scores = [], {}
+for model_name, model in final_models.items():
+    row, _, sv = ev.evaluate_train_val(model_name, model, meta, X, y)
+    cmp_rows.append(row)
+    val_scores[model_name] = sv
+cmp = pd.DataFrame(cmp_rows).set_index("model")
+metric_cols = ["base_rate", "pr_auc", "pr_auc_over_base_rate", "roc_auc", "precision", "recall", "f1"]
+train_val = pd.concat({
+    "train": cmp[[f"train_{c}" for c in metric_cols]].rename(columns=lambda c: c[len("train_"):]),
+    "validation": cmp[[f"val_{c}" for c in metric_cols]].rename(columns=lambda c: c[len("val_"):]),
+    "gap (train − validation)": cmp[["gap_pr_auc", "gap_roc_auc", "gap_f1"]].rename(columns=lambda c: c[len("gap_"):]),
+}, axis=1)
+display(pd.DataFrame({"frozen validation threshold": cmp["threshold"]}).T.round(3))
+fmt = {c: "{:.3f}" for c in train_val.columns}
+for split in ("train", "validation"):
+    fmt[(split, "base_rate")] = "{:.1%}"
+    fmt[(split, "pr_auc_over_base_rate")] = "{:.2f}x"
+display(train_val.style.format(fmt))
+# the validation numbers must agree with the section-10 baselines (same data, same code path)
+assert abs(cmp.loc["logistic regression", "val_pr_auc"] - val_table.loc["logistic regression", "pr_auc"]) < 1e-9"""),
+    md("""**What it shows.**
+- **Validation PR-AUC** (base rate 15.0%): −grid 0.639 (4.3×), −quali 0.654 (4.4×), logistic regression 0.726 (4.8×),
+  random forest 0.719 (4.8×), gradient boosting 0.727 (4.8×). ROC-AUC spans only 0.909–0.930.
+- **The three learned models are close to each other** (0.719–0.727) and 0.08–0.09 above the grid rule.
+- **Every model scores lower on train than on validation**, including the two rules that learn nothing (−grid 0.495 vs
+  0.639). So the negative gaps are mostly the era effect (train spans 1950–2019, with a 13.4% base rate and weaker
+  qualifying data), not evidence of absence of overfitting.
+- **Read the gap between models, not the sign:** the gap is smallest for random forest (−0.033), against −0.11 to −0.16
+  for the other four; random forest also has the best train PR-AUC (0.686). The chosen tree configurations are
+  regularised (min leaf 20, depth 12; depth 3), and the unregularised variants in 11.1–11.2 are the ones that overfit.
+- **F1 at the frozen threshold** is 0.692, 0.692, 0.702, 0.702 and 0.710 on validation. Precision and recall are
+  both 0.692 for the two rules (the threshold is "top 3 on the grid").
+- **Caution:** the hyperparameters and thresholds were picked on these validation rows, so the validation columns are
+  mildly optimistic. The differences between the three learned models are not meaningful at this size (11.5)."""),
+
+    md("""### 11.5 Paired race-level bootstrap on validation
+
+**Question:** are the PR-AUC differences between models larger than the noise? Whole races are resampled with
+replacement (B = 1000, seed 42), and **the same resampled races are used for both models** in each resample, so the
+interval is for the *difference*. It covers only the 39 validation races, so it is wide; it does not include
+the uncertainty from choosing hyperparameters on the same races."""),
+    code("""ref_grid, ref_lr = "naive: -grid", "logistic regression"
+val_idx = ev.split_rows(meta, "validation")
+pairs = [(m, ref_grid) for m in final_models if m != ref_grid] + \
+        [(m, ref_lr) for m in final_models if m not in (ref_grid, ref_lr)]
+boot = ev.paired_race_bootstrap(y.loc[val_idx].to_numpy(), val_scores, meta.loc[val_idx, "raceId"].to_numpy(), pairs,
+                                B=config.BOOTSTRAP_B, seed=config.RANDOM_SEED)
+boot["interval excludes 0"] = (boot["ci_low"] > 0) | (boot["ci_high"] < 0)
+display(boot.set_index(["versus", "model"])[["pr_auc_diff", "ci_low", "ci_high", "share_a_better",
+                                              "interval excludes 0"]]
+        .style.format({"pr_auc_diff": "{:+.3f}", "ci_low": "{:+.3f}", "ci_high": "{:+.3f}",
+                       "share_a_better": "{:.1%}"}))
+print("resamples:", int(boot["B"].iloc[0]), "| skipped (single class):", int(boot["skipped"].iloc[0]))"""),
+    md("""**What it shows.**
+- **Versus −grid, all three learned models are clearly better:** logistic regression +0.087 (95% interval +0.033 to
+  +0.141), random forest +0.080 (+0.027 to +0.131), gradient boosting +0.088 (+0.045 to +0.129). In at least 99.9% of
+  resamples each beats the grid rule.
+- **The qualifying rule is not distinguishable from the grid rule:** +0.016 (−0.018 to +0.051).
+- **Versus logistic regression, the tree models are not distinguishable:** random forest −0.007 (−0.041 to +0.027),
+  gradient boosting +0.001 (−0.039 to +0.035). Intervals of about ±0.035 mean the validation set can only detect
+  differences of a few hundredths; that is not the same as "no difference".
+- **The qualifying rule is below logistic regression:** −0.072 (−0.135 to −0.006), with the upper end close to 0.
+- **Limits:** 39 races only, and the intervals do not include the uncertainty from choosing hyperparameters on the same
+  races (the winner of 16–18 variants is optimistic)."""),
+
+    md("""### 11.6 Precision-recall and ROC curves (validation)"""),
+    code("""colors = {"naive: -grid": plots.INK_MUTED, "naive: -quali (fallback -grid)": plots.SERIES[3],
+          "logistic regression": plots.SERIES[0], "random forest": plots.SERIES[1],
+          "hist gradient boosting": plots.SERIES[2]}
+yv = y.loc[val_idx].to_numpy()
+fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), facecolor=plots.SURFACE)
+for ax in axes:
+    ax.set_facecolor(plots.SURFACE)
+for model_name, s in val_scores.items():
+    p_, r_, _ = precision_recall_curve(yv, s)
+    f_, t_, _ = roc_curve(yv, s)
+    style = "--" if model_name == "naive: -grid" else "-"
+    axes[0].plot(r_, p_, style, color=colors[model_name], linewidth=1.8, label=model_name)
+    axes[1].plot(f_, t_, style, color=colors[model_name], linewidth=1.8, label=model_name)
+axes[0].axhline(val_base, color=plots.INK_MUTED, linewidth=1, linestyle=":", label=f"no skill ({val_base:.0%})")
+axes[1].plot([0, 1], [0, 1], color=plots.INK_MUTED, linewidth=1, linestyle=":")
+plots.style_axes(axes[0], "Precision-recall (validation)", xlabel="recall", ylabel="precision")
+plots.style_axes(axes[1], "ROC (validation)", xlabel="false positive rate", ylabel="true positive rate")
+axes[0].legend(frameon=False, fontsize=8.5, labelcolor=plots.INK_MUTED, loc="upper right")
+fig.tight_layout()
+plt.show()"""),
+    md("""**What it shows.**
+- **The ROC curves are nearly on top of each other.** The three learned models and the qualifying rule are
+  indistinguishable by eye; the grid rule sits slightly lower at false-positive rates of 0.1–0.3.
+- **The precision-recall curves differ mostly at low recall (below about 0.3),** where only the few top-ranked drivers
+  count and the learned models' curves are spiky. They overlap from recall about 0.5 to 0.7.
+- **At high recall (0.75–0.95) the learned models keep somewhat more precision** than the grid rule, which is where
+  their PR-AUC advantage comes from.
+- **The two rules draw flat steps** because their scores are whole grid positions with many ties.
+
+> **Test stays locked.** `final_test_report` has not been called, and `results/final_test.csv` does not exist. The
+> choices above (model families, hyperparameters, class weights, thresholds) are all frozen from validation, so a later
+> one-off test evaluation is an honest estimate."""),
+
 ]
 
 nb = new_notebook(cells=cells)

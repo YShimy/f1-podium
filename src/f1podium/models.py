@@ -32,9 +32,11 @@ def build_preprocessor(scale: bool, features: list[str] = FEATURES) -> ColumnTra
     return prep.set_output(transform="pandas")
 
 
-def logistic_baseline() -> Pipeline:
-    """Median imputation + standardisation + L2 logistic regression with fixed default parameters."""
-    return Pipeline([("prep", build_preprocessor(scale=True)), ("clf", LogisticRegression(**LR_PARAMS))])
+def logistic_baseline(**params) -> Pipeline:
+    """Median imputation + standardisation + L2 logistic regression with fixed default parameters.
+
+    `params` override LR_PARAMS (used only for the class_weight comparison)."""
+    return Pipeline([("prep", build_preprocessor(scale=True)), ("clf", LogisticRegression(**{**LR_PARAMS, **params}))])
 
 
 class _RuleBaseline(ClassifierMixin, BaseEstimator):
