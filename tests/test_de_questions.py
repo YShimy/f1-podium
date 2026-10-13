@@ -360,17 +360,50 @@ def test_load_status_categories_rejects_bad_files(tmp_path, rows, message):
         de.load_status_categories(path)
 
 
+def lineage_of(ref_years, constructors):
+    """Lineage for a list of (constructorRef, year) pairs, via de.lineage_for."""
+    ids = constructors.set_index("constructorRef")["constructorId"]
+    df = pd.DataFrame({"constructorId": [ids[r] for r, _ in ref_years], "year": [y for _, y in ref_years]})
+    return de.lineage_for(df, de.load_constructor_lineage(), constructors).tolist()
+
+
 @pytest.mark.skipif(not Q3_RAW_PRESENT, reason="raw data not available")
-def test_lineage_covers_every_constructor_that_raced_in_the_q3_eras():
-    lineage = de.load_constructor_lineage()
-    races = load_table("races")
-    results = load_table("results")
-    first, last = config.Q3_ERAS[0][1], config.Q3_ERAS[-1][2]
-    in_window = results["raceId"].isin(races.loc[races["year"].between(first, last), "raceId"])
-    assert set(results.loc[in_window, "constructorId"]) <= set(lineage["constructorId"])
-    lin = lineage.set_index("constructorRef")["lineage"]
-    assert lin["toro_rosso"] == lin["alphatauri"] == lin["rb"]
-    assert lin["mclaren"] == "McLaren"
+def test_lineage_merges_renamed_teams_and_separates_reused_ids():
+    cons = load_table("constructors")
+    rb = lineage_of([("minardi", 2005), ("toro_rosso", 2019), ("alphatauri", 2020), ("rb", 2024)], cons)
+    assert len(set(rb)) == 1 and rb[0] == "Minardi / Toro Rosso / AlphaTauri / RB"
+    enstone = lineage_of([("renault", 2020), ("alpine", 2021), ("renault", 2005), ("lotus_f1", 2014)], cons)
+    assert len(set(enstone)) == 1
+    assert lineage_of([("renault", 1980)], cons) == ["Renault"]            # 1977-85 works team kept apart
+    am = lineage_of([("force_india", 2018), ("racing_point", 2019), ("aston_martin", 2021)], cons)
+    assert len(set(am)) == 1
+    assert lineage_of([("aston_martin", 1959)], cons) == ["Aston Martin"]  # 1959-60 team kept apart
+    assert lineage_of([("mercedes", 1954), ("mercedes", 2014)], cons)[0] == "Mercedes"
+    assert lineage_of([("mclaren", 2024), ("ferrari", 1950)], cons) == ["McLaren", "Ferrari"]  # not covered
+
+
+@pytest.mark.skipif(not Q3_RAW_PRESENT, reason="raw data not available")
+def test_every_result_resolves_to_one_lineage():
+    cons = load_table("constructors")
+    results = load_table("results").merge(load_table("races")[["raceId", "year"]], on="raceId")
+    lin = de.lineage_for(results, de.load_constructor_lineage(), cons)
+    assert lin.notna().all() and len(lin) == len(results)
+    # Explicit lineage names never collide with a constructor name used as a fallback.
+    explicit = set(de.load_constructor_lineage()["lineage"])
+    assert not explicit & set(cons["name"])
+
+
+@pytest.mark.parametrize("rows, message", [
+    ("constructorId,constructorRef,first_year,last_year,lineage,note\n4,renault,2002,2011,E,\n4,renault,2010,2020,E,\n",
+     "overlapping"),
+    ("constructorId,constructorRef,first_year,last_year,lineage,note\n4,renault,2012,2011,E,\n", "first_year"),
+    ("constructorId,constructorRef,lineage,note\n4,renault,E,\n", "columns"),
+])
+def test_load_constructor_lineage_rejects_bad_files(tmp_path, rows, message):
+    path = tmp_path / "lineage.csv"
+    path.write_text(rows, encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        de.load_constructor_lineage(path)
 
 
 @pytest.fixture
@@ -451,8 +484,22 @@ def test_overall_mechanical_change_counts(q3_tables):
     assert alt["mech_old"] == 2
 
 
-def test_add_lineage_raises_on_missing_constructor(q3_tables):
+def toy_lineage():
+    return pd.DataFrame({"constructorId": pd.array([100], dtype="Int64"), "first_year": pd.array([2015], dtype="Int64"),
+                         "last_year": pd.array([2024], dtype="Int64"), "lineage": ["Alpha line"]})
+
+
+def test_add_lineage_uses_year_range_and_falls_back_to_name(q3_tables):
     out = de.build_retirement_table(*q3_tables)
-    lineage = pd.DataFrame({"constructorId": pd.array([100], dtype="Int64"), "lineage": ["A"]})
-    with pytest.raises(AssertionError, match="missing from the lineage"):
-        de.add_lineage(out, lineage)
+    constructors = q3_tables[2]
+    lin = de.add_lineage(out, toy_lineage(), constructors).set_index(["raceId", "driverId"])["lineage"]
+    assert lin[(1, 1)] == "Alpha line" and lin[(2, 1)] == "Alpha line"   # constructor 100 in 2016 and 2023
+    assert lin[(1, 3)] == "Beta"                                         # constructor 200: not covered -> own name
+    assert len(lin) == len(out)
+
+
+def test_add_lineage_raises_on_unknown_constructor(q3_tables):
+    out = de.build_retirement_table(*q3_tables)
+    constructors = q3_tables[2][q3_tables[2]["constructorId"] != 200]
+    with pytest.raises(AssertionError, match="not in constructors"):
+        de.add_lineage(out, toy_lineage(), constructors)

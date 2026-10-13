@@ -1,21 +1,39 @@
-constructorId,constructorRef,lineage,note
-1,mclaren,McLaren,
-3,williams,Williams,
-6,ferrari,Ferrari,
-9,red_bull,Red Bull,
-131,mercedes,Mercedes,
-210,haas,Haas F1 Team,
-207,caterham,Caterham,
-5,toro_rosso,Toro Rosso / AlphaTauri / RB,Faenza team renamed (2020 AlphaTauri; 2024 RB)
-213,alphatauri,Toro Rosso / AlphaTauri / RB,Faenza team renamed (2020 AlphaTauri; 2024 RB)
-215,rb,Toro Rosso / AlphaTauri / RB,Faenza team renamed (2020 AlphaTauri; 2024 RB)
-10,force_india,Force India / Racing Point / Aston Martin,Silverstone team bought mid-2018 (Racing Point); renamed 2021 (Aston Martin)
-211,racing_point,Force India / Racing Point / Aston Martin,Silverstone team bought mid-2018 (Racing Point); renamed 2021 (Aston Martin)
-117,aston_martin,Force India / Racing Point / Aston Martin,Silverstone team bought mid-2018 (Racing Point); renamed 2021 (Aston Martin)
-208,lotus_f1,Lotus / Renault / Alpine,Enstone team bought by Renault for 2016; renamed Alpine 2021
-4,renault,Lotus / Renault / Alpine,Enstone team bought by Renault for 2016; renamed Alpine 2021
-214,alpine,Lotus / Renault / Alpine,Enstone team bought by Renault for 2016; renamed Alpine 2021
-15,sauber,Sauber / Alfa Romeo,Hinwil team; Alfa Romeo 2019-2023; Ergast reuses constructorId 15 for Sauber in 2024
-51,alfa,Sauber / Alfa Romeo,Hinwil team; Alfa Romeo 2019-2023; Ergast reuses constructorId 15 for Sauber in 2024
-206,marussia,Marussia / Manor,Banbury team renamed Manor Marussia for 2015
-209,manor,Marussia / Manor,Banbury team renamed Manor Marussia for 2015
+constructorId,constructorRef,first_year,last_year,lineage,note
+25,tyrrell,1970,1998,Tyrrell / BAR / Honda / Brawn / Mercedes,Brackley team: Tyrrell bought by BAR for 1999
+16,bar,1999,2005,Tyrrell / BAR / Honda / Brawn / Mercedes,BAR became the Honda works team for 2006
+11,honda,2006,2008,Tyrrell / BAR / Honda / Brawn / Mercedes,Honda 1964-1968 is a different team (not covered: keeps its own name)
+23,brawn,2009,2009,Tyrrell / BAR / Honda / Brawn / Mercedes,management buyout of Honda
+131,mercedes,2010,2024,Tyrrell / BAR / Honda / Brawn / Mercedes,Mercedes bought Brawn; Mercedes 1954-1955 is a different team (not covered)
+17,jordan,1991,2005,Jordan / Force India / Racing Point / Aston Martin,Silverstone team
+13,mf1,2006,2006,Jordan / Force India / Racing Point / Aston Martin,Jordan bought by Midland
+14,spyker_mf1,2006,2006,Jordan / Force India / Racing Point / Aston Martin,renamed late 2006
+12,spyker,2007,2007,Jordan / Force India / Racing Point / Aston Martin,
+10,force_india,2008,2018,Jordan / Force India / Racing Point / Aston Martin,bought mid-2018 (Ergast keeps id 10 for 2018)
+211,racing_point,2019,2020,Jordan / Force India / Racing Point / Aston Martin,
+117,aston_martin,2021,2024,Jordan / Force India / Racing Point / Aston Martin,Aston Martin 1959-1960 is a different team (not covered)
+18,minardi,1985,2005,Minardi / Toro Rosso / AlphaTauri / RB,Faenza team: bought by Red Bull for 2006
+5,toro_rosso,2006,2019,Minardi / Toro Rosso / AlphaTauri / RB,
+213,alphatauri,2020,2023,Minardi / Toro Rosso / AlphaTauri / RB,
+215,rb,2024,2024,Minardi / Toro Rosso / AlphaTauri / RB,
+24,stewart,1997,1999,Stewart / Jaguar / Red Bull,Milton Keynes team
+19,jaguar,2000,2004,Stewart / Jaguar / Red Bull,
+9,red_bull,2005,2024,Stewart / Jaguar / Red Bull,Red Bull bought Jaguar
+53,toleman,1981,1985,Toleman / Benetton / Renault / Lotus / Alpine,Enstone team
+22,benetton,1986,2001,Toleman / Benetton / Renault / Lotus / Alpine,
+4,renault,2002,2020,Toleman / Benetton / Renault / Lotus / Alpine,Renault 2002-2011 and 2016-2020 (no results 2012-2015); Renault 1977-1985 is a different team (not covered)
+208,lotus_f1,2012,2015,Toleman / Benetton / Renault / Lotus / Alpine,
+214,alpine,2021,2024,Toleman / Benetton / Renault / Lotus / Alpine,
+15,sauber,1993,2024,Sauber / BMW Sauber / Alfa Romeo,Hinwil team: Sauber 1993-2005; 2010-2018; 2024 (Ergast reuses id 15)
+2,bmw_sauber,2006,2009,Sauber / BMW Sauber / Alfa Romeo,
+51,alfa,2019,2023,Sauber / BMW Sauber / Alfa Romeo,Alfa Romeo before 2019 is a different team (not covered)
+166,virgin,2010,2011,Virgin / Marussia / Manor,Banbury team
+206,marussia,2012,2014,Virgin / Marussia / Manor,
+209,manor,2015,2016,Virgin / Marussia / Manor,
+205,lotus_racing,2010,2011,Lotus Racing / Caterham,Hingham/Leafield team
+207,caterham,2012,2014,Lotus Racing / Caterham,
+27,ligier,1976,1996,Ligier / Prost,Prost bought Ligier for 1997
+20,prost,1997,2001,Ligier / Prost,
+21,arrows,1978,2002,Arrows / Footwork,Arrows 1978-1990 and 1997-2002 (Footwork in between)
+29,footwork,1991,1996,Arrows / Footwork,
+37,march,1987,1992,March / Leyton House,March 1987-1989 and 1992 (Leyton House in between); March 1970-1982 is a different team (not covered)
+41,leyton,1990,1991,March / Leyton House,

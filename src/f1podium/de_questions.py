@@ -540,7 +540,7 @@ STATUS_CATEGORY_PATH = REFERENCE_DIR / "status_category.csv"
 CONSTRUCTOR_LINEAGE_PATH = REFERENCE_DIR / "constructor_lineage.csv"
 STATUS_CATEGORIES = ("finished", "mechanical", "accident_driver", "regulatory", "other")
 STATUS_MAP_COLUMNS = ["status", "category", "ambiguous", "alt_category", "note"]
-LINEAGE_COLUMNS = ["constructorId", "constructorRef", "lineage", "note"]
+LINEAGE_COLUMNS = ["constructorId", "constructorRef", "first_year", "last_year", "lineage", "note"]
 MECHANICAL = "mechanical"
 
 
@@ -582,14 +582,47 @@ def check_status_categories(mapping: pd.DataFrame, status: pd.DataFrame) -> dict
 
 
 def load_constructor_lineage(path: Path = CONSTRUCTOR_LINEAGE_PATH) -> pd.DataFrame:
-    """Read the constructorId -> lineage mapping (renamed or bought teams merged). Unique on constructorId."""
-    m = pd.read_csv(path, dtype={"constructorId": "Int64"}, keep_default_na=False)
+    """Read the (constructorId, year range) -> lineage mapping (renamed or bought teams merged).
+
+    A constructorId can have several rows for different year ranges, because Ergast reuses some ids
+    for unrelated teams (e.g. Renault 1977-85 vs the Enstone team). Raises on wrong columns, empty
+    lineages, first_year > last_year, or overlapping ranges for one constructorId.
+    """
+    m = pd.read_csv(path, dtype={"constructorId": "Int64", "first_year": "Int64", "last_year": "Int64"},
+                    keep_default_na=False)
     if list(m.columns) != LINEAGE_COLUMNS:
         raise ValueError(f"lineage columns must be {LINEAGE_COLUMNS}, got {list(m.columns)}")
-    _require_unique(m, ["constructorId"], "constructor lineage")
     if (m["lineage"].str.strip() == "").any():
         raise ValueError("lineage has empty values")
+    if (m["first_year"] > m["last_year"]).any():
+        raise ValueError("lineage has first_year > last_year")
+    s = m.sort_values(["constructorId", "first_year"])
+    prev_last = s.groupby("constructorId")["last_year"].shift(1)
+    if (s["first_year"] <= prev_last).any():
+        raise ValueError("lineage has overlapping year ranges for one constructorId")
     return m
+
+
+def lineage_for(df: pd.DataFrame, lineage: pd.DataFrame, constructors: pd.DataFrame) -> pd.Series:
+    """Lineage per row of df (needs constructorId and year), aligned to df.index.
+
+    The row whose year range covers (constructorId, year) gives the lineage; a (constructorId, year)
+    not covered by any row keeps the constructor's own name. Raises if a row matches two ranges or
+    the constructorId is not in constructors.
+    """
+    rows = df[["constructorId", "year"]].reset_index(drop=True).rename_axis("_row").reset_index()
+    m = rows.merge(lineage[["constructorId", "first_year", "last_year", "lineage"]], on="constructorId", how="inner")
+    hit = m[(m["year"] >= m["first_year"]) & (m["year"] <= m["last_year"])]
+    if hit["_row"].duplicated().any():
+        raise AssertionError("a (constructorId, year) matches more than one lineage range")
+    out = pd.Series(np.nan, index=rows["_row"], dtype="object")
+    out[hit["_row"].to_numpy()] = hit["lineage"].to_numpy()
+    names = rows["constructorId"].map(constructors.set_index("constructorId")["name"])
+    out = out.fillna(names)
+    if out.isna().any():
+        raise AssertionError("constructorIds not in constructors: "
+                             f"{sorted(rows.loc[out.isna().to_numpy(), 'constructorId'].unique())}")
+    return pd.Series(out.to_numpy(), index=df.index, name="lineage")
 
 
 def assign_q3_era(year: pd.Series, eras=config.Q3_ERAS) -> pd.Series:
@@ -650,14 +683,9 @@ def build_retirement_table(
     return out
 
 
-def add_lineage(df: pd.DataFrame, lineage: pd.DataFrame) -> pd.DataFrame:
-    """Add a `lineage` column; raises if a constructorId in df is not in the lineage file."""
-    out = df.merge(lineage[["constructorId", "lineage"]], on="constructorId", how="left", validate="many_to_one")
-    _require_rows(out, len(df), "join to lineage")
-    if out["lineage"].isna().any():
-        raise AssertionError("constructorIds missing from the lineage file: "
-                             f"{sorted(out.loc[out['lineage'].isna(), 'constructorId'].unique())}")
-    return out
+def add_lineage(df: pd.DataFrame, lineage: pd.DataFrame, constructors: pd.DataFrame) -> pd.DataFrame:
+    """Add a `lineage` column (see lineage_for); the row count never changes."""
+    return df.assign(lineage=lineage_for(df, lineage, constructors))
 
 
 def mechanical_rates(df: pd.DataFrame, by: str = "constructorId", flag: str = "mechanical",

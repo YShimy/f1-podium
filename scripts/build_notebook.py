@@ -1746,7 +1746,7 @@ in_eras = results_clean["raceId"].isin(
 assert len(ret) == in_eras.sum(), "the era filter should be the only step that removes rows"
 
 lineage = de.load_constructor_lineage()
-ret_lin = de.add_lineage(ret, lineage)
+ret_lin = de.add_lineage(ret, lineage, tables["constructors"])
 print(f"rows: results_clean {len(results_clean)} -> joined (all checks passed) -> {len(ret)} in "
       f"{config.Q3_ERAS[0][1]}–{config.Q3_ERAS[-1][2]}")
 print("starts per era:", ret.groupby("era").size().to_dict())"""),
