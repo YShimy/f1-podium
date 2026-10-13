@@ -40,7 +40,8 @@ Goal: for each driver in each race, predict whether they finish on the podium
 (`results.positionOrder <= 3`), using only information available after qualifying.
 
 Sections: **1** Setup, **2** Data Loading, **3** Raw Data Audit, **4** Audit follow-ups,
-**5** Findings → open decisions, **6** Cleaning. Sections 3–4 only *measure* the raw data;
+**5** Findings → open decisions, **6** Cleaning, **7** Post-cleaning EDA, **8** Data-engineering questions,
+**9** Modeling table. Sections 3–4 only *measure* the raw data;
 cleaning happens only in section 6, following decisions recorded in the notebook.
 Reusable code lives in `src/f1podium/`."""),
 
@@ -592,7 +593,8 @@ Decisions are labelled D1, D2, … and recorded in full in section 6.
 | 11 Indianapolis 500 races (1950–1960); they also hold 21 of the 85 duplicate pairs | 4.2 | **D2** Indy 500 exclusion | Exclude races at the Indianapolis circuit in 1950–1960 (see 6.1) | **Decided** |
 | About 1,500 entries that never started (DNQ, DNPQ, 107% rule, withdrawn without a grid slot) | 4.1, 4.1b | **D3** Non-starters | Exclude by status, plus grid for *Withdrew* (see 6.2) | **Decided** |
 | … | 3.5, 4.3 | Missing-qualifying strategy / training window | … | Pending |
-| `grid = 0` means "did not start" before 2000 and mostly "pit-lane start" after 2010 | 3.6, 4.1 | Meaning of `grid = 0` **as a feature** | … | Pending |"""),
+| `grid = 0` means "did not start" before 2000 and mostly "pit-lane start" after 2010 | 3.6, 4.1 | Meaning of `grid = 0` **as a feature** | After cleaning, a pit-lane start: `pit_lane_start = 1`, `grid_filled` = number of starters (see 9) | **Decided** |
+| `results.points` excludes sprint points (2021–2024) | 9.5 | Sprint data | Sprint points of **earlier** rounds count towards `points_before`; the current round's sprint is never used (see 9) | **Decided** |"""),
 
     md("""## 6. Cleaning
 
@@ -1933,6 +1935,155 @@ and the category mapping are many-to-one with unchanged row counts (asserted). 4
 - **Starts are treated as independent.** Two cars of one team in one race share parts and conditions, so the
   intervals and p-values are somewhat too optimistic.
 - **Overlapping intervals mean "not distinguishable at this n", not "no difference".**"""),
+
+    md("""## 9. Modeling table
+
+One row per `(raceId, driverId)` of `results_clean` (a race start). The table is split into three aligned parts:
+**`meta`** (keys, year, round, split; never features), **`X`** (features) and **`y`** (podium, `positionOrder <= 3`),
+so the target can never slip into the features. Code: `src/f1podium/features.py`; checks: `src/f1podium/leakage.py`.
+
+**Prediction cutoff: after qualifying, before the race starts.** The leakage rules applied (from the project rules):
+- **Current race:** only `results.grid`, `qualifying` and static metadata. Never position, positionText, positionOrder,
+  points, laps, time, milliseconds, fastestLap*, rank, statusId or status, nor `lap_times`, `pit_stops`,
+  `constructor_results` or standings of the same race (`config.FORBIDDEN_CURRENT_RACE_COLUMNS` / `_TABLES`).
+- **Standings are cumulative after a race**, so season points are rebuilt from *earlier* rounds only.
+- **Form features use earlier races only:** ordered by `(year, round)`, never `raceId` (which is not chronological),
+  and shifted by one race before any rolling or cumulative statistic.
+- **No imputation, scaling or encoding here.** Missing values stay NaN; later pipelines are fitted on training data only.
+
+**Decisions taken for this table (2026-10-13):**
+- `grid = 0` → `pit_lane_start = 1` and `grid_filled` = number of starters (back of the field).
+- Sprint points of earlier rounds count towards `points_before`; the current round's sprint is never used.
+- `rank_before` ranks `points_before` within race R's field (ties share the best rank); NaN at round 1.
+- Rolling windows use partial history (NaN only with no earlier race); `races_before` says how much history there is.
+- **Still open:** the training window and the missing-qualifying strategy (the table keeps NaN plus `has_quali`)."""),
+    code("""from f1podium import features as feats
+from f1podium import leakage
+
+meta, X, y = feats.build_modeling_table(tables, results_clean)
+assert len(meta) == len(X) == len(y) == len(results_clean)
+assert not meta.duplicated(["raceId", "driverId"]).any(), "modeling table is not unique on (raceId, driverId)"
+assert meta.index.equals(X.index) and X.index.equals(y.index)
+print("meta:", meta.shape, "| X:", X.shape, "| y:", y.shape, "| features:", X.shape[1])
+display(pd.concat([meta, X], axis=1).query("year == 2024 and round == 2").head(5).T)"""),
+
+    md("""### 9.2 Feature dictionary
+
+Definition, source, when it becomes available relative to the cutoff, window, and the share of missing values
+(all rows and the training split)."""),
+    code("""fdict = feats.feature_dictionary()
+fdict["missing (all)"] = X.isna().mean().map("{:.1%}".format)
+fdict["missing (train)"] = X[meta["split"] == "train"].isna().mean().map("{:.1%}".format)
+with pd.option_context("display.max_colwidth", 90):
+    display(fdict)"""),
+
+    md("""### 9.3 Missingness by era
+
+**Question:** where are features missing, and why? Share of NaN per feature with any missing value, by decade and by
+split."""),
+    code("""with_na = [c for c in X.columns if X[c].isna().any()]
+by_decade = X[with_na].isna().groupby((meta["year"] // 10 * 10).rename("decade")).mean()
+by_split = X[with_na].isna().groupby(meta["split"]).mean().reindex(list(feats.SPLITS))
+display(by_decade.T.style.format("{:.0%}"))
+display(by_split.T.style.format("{:.1%}"))
+
+q_cov = X.groupby(meta["year"])["has_quali"].mean()
+print("qualifying coverage by season, 1994–2003:", q_cov.loc[1994:2003].round(2).to_dict())"""),
+    md("""**What it shows.**
+- **`quali_position` is the only feature with large gaps:** 57.7% missing overall (63.1% in train). It is missing for
+  every season before 1994, patchy in 1994–2002 (coverage 6%–100% per season), and complete from 2003 (0.1% missing in
+  validation, 0% in test). `has_quali` marks it. How to fill it is still an open decision, for the pipeline.
+- **`rank_before` is NaN on round-1 rows only** (6.5%), by design.
+- **Form features are NaN only without history:** driver form 2.8% (career debuts; 14% of rows in the 1950s, 1% from
+  2000), constructor form and mechanical rate 1.1% (a constructor's first race).
+- **Validation and test are almost complete:** the largest gap is 5.1% (validation), the round-1 ranks."""),
+
+    md("""### 9.4 Target rate by split
+
+The splits are by season: train ≤ 2019, validation 2020–2021, test ≥ 2022 (`config`)."""),
+    code("""split_summary = (
+    pd.DataFrame({"split": meta["split"], "year": meta["year"], "raceId": meta["raceId"], "podium": y})
+    .groupby("split").agg(first_year=("year", "min"), last_year=("year", "max"), races=("raceId", "nunique"),
+                          rows=("podium", "size"), podiums=("podium", "sum"), base_rate=("podium", "mean"))
+    .reindex(list(feats.SPLITS))
+)
+display(split_summary.style.format({"base_rate": "{:.1%}"}))"""),
+    md("""**What it shows.**
+- **Train:** 1950–2019, 1,007 races, 22,624 rows, 13.4% podium.
+- **Validation:** 2020–2021, 39 races, 780 rows, 15.0%. **Test:** 2022–2024, 68 races, 1,357 rows, 15.0%.
+- **The base rate is higher in recent seasons** because fields are smaller (about 20 cars, 3 podium places each race) than
+  in earlier decades. A model that always says "no podium" would be right 85–87% of the time, so accuracy is not a useful
+  metric here."""),
+
+    md("""### 9.5 Leakage checks
+
+The same six checks as `tests/test_features.py`, run here on the real table:
+1. **Brute force:** every lagged feature of 200 random rows recomputed by naive code that only sees rows strictly
+   earlier by `(year, round)`.
+2. **Perturbation:** reverse the results, points and statuses of one race R and rebuild. Nothing up to and including R
+   may change; later races must change; only R's targets change.
+3. **Standings:** `points_before` vs the standings table of the previous round.
+4. **Forbidden columns:** none of the current-race outcome columns are in X.
+5. **Prefix invariance:** race R's rows built from data up to R only are identical to the full build.
+6. **Split:** disjoint, complete and ordered in time."""),
+    code("""checks = {}
+
+mism, n_checked = leakage.bruteforce_mismatches(tables, results_clean, meta, X, n=200)
+checks["1 brute force (200 random rows)"] = (mism.empty, f"{n_checked} rows x {len(leakage.LAGGED_FEATURES)} lagged "
+                                             f"features, {len(mism)} mismatching cells")
+
+def rid(year, rnd):
+    return int(meta.loc[(meta["year"] == year) & (meta["round"] == rnd), "raceId"].iloc[0])
+
+pert = leakage.perturbation_check(tables, results_clean, rid(2012, 10))
+checks["2 perturbation (2012 round 10)"] = (
+    pert["changed_rows_up_to_and_incl_R"] == 0 and pert["changed_rows_after_R"] > 0
+    and pert["changed_targets_outside_R"] == 0,
+    f"changed rows up to and incl. R: {pert['changed_rows_up_to_and_incl_R']}, after R: {pert['changed_rows_after_R']}, "
+    f"targets changed in R: {pert['changed_targets_in_R']}, outside R: {pert['changed_targets_outside_R']}")
+
+standings = leakage.standings_check(tables, meta, X)
+drv_recent = standings.query("who == 'drivers' and decade >= 1990")["mismatches"].sum()
+checks["3 standings (drivers, 1990–2024)"] = (drv_recent == 0, f"{drv_recent} mismatches; full table below")
+
+bad_cols = leakage.forbidden_columns(X, y)
+checks["4 forbidden columns"] = (bad_cols == [], f"forbidden columns in X: {bad_cols}")
+
+prefix = leakage.prefix_invariance_check(
+    tables, results_clean,
+    [rid(2023, 1), rid(2012, 10), rid(2021, 11), int(meta.sort_values(["year", "round"])["raceId"].iloc[-1])],
+    full=(meta, X, y))
+checks["5 prefix invariance (4 races)"] = (bool(prefix["identical"].all()),
+                                           f"{int(prefix['identical'].sum())} of {len(prefix)} races identical")
+
+split = leakage.split_check(meta)
+checks["6 split"] = (split["disjoint"] and split["races_disjoint"] and split["complete"] and split["ordered"],
+                     f"ranges (first, last, rows): {split['ranges']}")
+
+check_table = pd.DataFrame({k: {"passed": v[0], "detail": v[1]} for k, v in checks.items()}).T
+with pd.option_context("display.max_colwidth", 140):
+    display(check_table)
+assert check_table["passed"].all(), "a leakage check failed"
+
+print("points_before vs previous-round standings, mismatches by decade:")
+display(standings.pivot(index="decade", columns="who", values=["mismatches", "rows"]))"""),
+    md("""**What it shows.**
+- **All six checks pass** (asserted). The brute-force recomputation agrees on all 200 × 15 lagged cells. Reversing
+  the 2012 round-10 results changes none of the rows up to and including that race and 240 rows afterwards. The rows of
+  4 races built from data up to that race are identical to the full build.
+- **Standings, drivers:** 0 mismatches from 1990 to 2024. 2021–2024 only match because sprint points of earlier rounds are
+  included. The 120 mismatches before 1990 come from the old dropped-scores rules (only a driver's best N results
+  counted) and shared drives.
+- **Standings, constructors:**
+  - **Before 1980 the differences are expected.** The constructors' championship only started in 1958, and until 1979
+    only the best-placed car of a team scored.
+  - **The 23 mismatches from 2000 are three documented standings adjustments**, not leakage:
+    - McLaren 2007, constructors' points removed at Hungary (−15).
+    - Force India 2018, standings restarted at zero after the mid-season takeover.
+    - Racing Point 2020, a 15-point penalty.
+  - `con_points_before` counts the points scored on track. The test allows exactly these three cases and fails on any other.
+- **Known limitation:** constructor history follows `constructorId`, so a renamed team starts again; RB in 2024 has
+  `con_races_before` = 1 at its second race. Merging lineages (as in Q3's sensitivity) is an *Experiment* for later."""),
 ]
 
 nb = new_notebook(cells=cells)
