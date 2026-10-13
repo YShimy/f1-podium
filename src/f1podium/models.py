@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
@@ -66,6 +67,31 @@ class QualiBaseline(_RuleBaseline):
     def decision_function(self, X: pd.DataFrame) -> np.ndarray:
         has_q = X["has_quali"].to_numpy() == 1
         return np.where(has_q, -X["quali_position"].to_numpy(float), -X["grid_filled"].to_numpy(float))
+
+
+def random_forest(**params) -> Pipeline:
+    """Same median-imputation preprocessing as LR (no scaler: trees are scale-free) + random forest.
+
+    Defaults (overridden by params): 200 trees, unlimited depth, min_samples_leaf=1, class_weight=None;
+    seed 42, single-threaded: with several threads the per-tree probabilities are summed in a varying
+    order, so predictions differ at the 1e-16 level between runs (a test checks bit-identical results).
+    """
+    clf = RandomForestClassifier(**{"n_estimators": 200, "max_depth": None, "min_samples_leaf": 1,
+                                    "class_weight": None, "random_state": config.RANDOM_SEED, "n_jobs": 1, **params})
+    return Pipeline([("prep", build_preprocessor(scale=False)), ("clf", clf)])
+
+
+def hist_gradient_boosting(**params) -> Pipeline:
+    """Same preprocessing as the other models (median imputation, no scaler) + HistGradientBoosting.
+
+    HistGradientBoosting handles NaN natively, so the imputation is irrelevant to it; it is kept
+    identical so all models see exactly the same inputs. Early stopping is off (max_iter is a grid
+    parameter and nothing is split off the training rows); seed 42.
+    """
+    clf = HistGradientBoostingClassifier(**{"learning_rate": 0.1, "max_iter": 100, "max_depth": None,
+                                            "l2_regularization": 0.0, "class_weight": None,
+                                            "early_stopping": False, "random_state": config.RANDOM_SEED, **params})
+    return Pipeline([("prep", build_preprocessor(scale=False)), ("clf", clf)])
 
 
 def baseline_models() -> dict:

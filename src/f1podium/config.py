@@ -98,6 +98,13 @@ TEST_START_YEAR = 2022
 RANDOM_SEED = 42
 BOOTSTRAP_B = 1000                      # race-level bootstrap resamples (seed: RANDOM_SEED)
 
+# Tree-model grids. Small and stated; every value is tried and the best VALIDATION PR-AUC is chosen
+# (ties: the first in the order listed). The test split is never used to choose anything.
+RF_GRID = {"n_estimators": (200, 500), "max_depth": (6, 12, None), "min_samples_leaf": (1, 5, 20)}
+HGB_GRID = {"learning_rate": (0.03, 0.1), "max_iter": (100, 300), "max_depth": (3, 6),
+            "l2_regularization": (0.0, 1.0)}
+CLASS_WEIGHTS = (None, "balanced")      # compared once per model at its chosen grid configuration
+
 # Data-engineering questions (descriptive analyses of race outcomes; not model features).
 DE_WINDOW = (2003, 2024)          # primary window: seasons with near-complete qualifying data
 DE_ERA_SPLIT_YEAR = 2014          # eras: <= 2013 vs >= 2014

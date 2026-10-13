@@ -144,3 +144,103 @@ def test_scores_uses_predict_proba_for_logistic_regression():
     s = E.scores(model, X)
     assert ((s >= 0) & (s <= 1)).all()
     assert M.LR_PARAMS["class_weight"] is None and M.LR_PARAMS["solver"] == "lbfgs"
+
+
+# --- tree models, grids and the paired bootstrap ------------------------------------------------------
+
+def _val_scores(model_factory, meta, X, y, **params):
+    _, _, s = E.evaluate_train_val("m", model_factory(**params), meta, X, y)
+    return s
+
+
+@pytest.mark.parametrize("factory, params", [
+    (M.random_forest, {"n_estimators": 30, "max_depth": 4}),
+    (M.hist_gradient_boosting, {"max_iter": 20, "max_depth": 3}),
+])
+def test_same_seed_gives_identical_results(factory, params):
+    meta, X, y = synthetic_table()
+    a = _val_scores(factory, meta, X, y, **params)
+    b = _val_scores(factory, meta, X, y, **params)
+    np.testing.assert_array_equal(a, b)
+
+
+def test_tree_pipelines_use_the_same_preprocessing_as_lr_without_a_scaler():
+    meta, X, y = synthetic_table()
+    for model in (M.random_forest(n_estimators=5), M.hist_gradient_boosting(max_iter=5)):
+        E.fit_on_train(model, meta, X, y)
+        steps = model.named_steps["prep"].named_transformers_["num"].named_steps
+        assert list(steps) == ["impute"]                                    # no scaler for trees
+        train = X.loc[E.split_rows(meta, "train")]
+        np.testing.assert_allclose(steps["impute"].statistics_, train.median().to_numpy())
+    assert M.random_forest().named_steps["clf"].random_state == config.RANDOM_SEED == 42
+    assert M.hist_gradient_boosting().named_steps["clf"].random_state == 42
+
+
+def test_grids_have_the_stated_size():
+    assert len(E.param_variants(config.RF_GRID)) == 2 * 3 * 3
+    assert len(E.param_variants(config.HGB_GRID)) == 2 * 2 * 2 * 2
+    assert E.param_variants({"a": (1, 2), "b": ("x",)}) == [{"a": 1, "b": "x"}, {"a": 2, "b": "x"}]
+
+
+def test_grid_search_never_touches_test_rows(monkeypatch):
+    meta, X, y = synthetic_table()
+    y = y.astype(float)
+    y[meta["split"] == "test"] = np.nan                                    # would break any metric that read it
+    X = X.copy()
+    X.loc[meta["split"] == "test"] = np.nan
+    requested = []
+    real = E.split_rows
+    monkeypatch.setattr(E, "split_rows", lambda m, split: (requested.append(split), real(m, split))[1])
+    table, best = E.tune_on_validation("rf", M.random_forest, {"n_estimators": (10, 20), "max_depth": (2, 3)},
+                                       meta, X, y)
+    assert len(table) == 4 and set(requested) == {"train", "validation"}
+    assert table["chosen"].sum() == 1 and best in E.param_variants({"n_estimators": (10, 20), "max_depth": (2, 3)})
+
+
+class _FlipRule(M.GridBaseline):
+    """-grid when sign=1, +grid when sign=-1 (a deliberately bad variant)."""
+
+    def __init__(self, sign=1):
+        self.sign = sign
+
+    def decision_function(self, X):
+        return self.sign * super().decision_function(X)
+
+
+def test_tuning_picks_highest_validation_pr_auc_and_first_on_ties():
+    meta, X, y = synthetic_table()
+    table, best = E.tune_on_validation("rule", _FlipRule, {"sign": (-1, 1, 1)}, meta, X, y)
+    assert best == {"sign": 1}
+    assert table["chosen"].tolist() == [False, True, False]                 # variants 1 and 2 tie: first wins
+
+
+def test_paired_bootstrap_difference_is_zero_for_identical_scores():
+    rng = np.random.default_rng(3)
+    race_ids = np.repeat(np.arange(40), 10)
+    y = np.tile((np.arange(10) < 2).astype(int), 40)
+    s = rng.normal(size=len(y)) - y
+    out = E.paired_race_bootstrap(y, {"a": s, "b": s.copy()}, race_ids, [("a", "b")], B=200, seed=42)
+    row = out.iloc[0]
+    assert row["pr_auc_diff"] == 0 and row["ci_low"] == 0 and row["ci_high"] == 0 and row["share_a_better"] == 0
+
+
+def test_paired_bootstrap_detects_a_better_model_and_is_reproducible():
+    rng = np.random.default_rng(4)
+    race_ids = np.repeat(np.arange(60), 10)
+    y = np.tile((np.arange(10) < 2).astype(int), 60)
+    good = y * 2.0 + rng.normal(scale=0.5, size=len(y))
+    bad = rng.normal(size=len(y))
+    kw = dict(race_ids=race_ids, pairs=[("good", "bad")], B=200, seed=42)
+    a = E.paired_race_bootstrap(y, {"good": good, "bad": bad}, **kw)
+    b = E.paired_race_bootstrap(y, {"good": good, "bad": bad}, **kw)
+    pd.testing.assert_frame_equal(a, b)
+    assert a.loc[0, "ci_low"] > 0 and a.loc[0, "share_a_better"] == 1.0
+    assert a.loc[0, "ci_low"] <= a.loc[0, "pr_auc_diff"] <= a.loc[0, "ci_high"]
+
+
+def test_train_val_gap_columns():
+    meta, X, y = synthetic_table()
+    row, _, s = E.evaluate_train_val("lr", M.logistic_baseline(), meta, X, y)
+    assert row["gap_pr_auc"] == pytest.approx(row["train_pr_auc"] - row["val_pr_auc"])
+    assert row["val_n"] == len(s) == int((meta["split"] == "validation").sum())
+    assert row["val_base_rate"] == pytest.approx(float(y[meta["split"] == "validation"].mean()))

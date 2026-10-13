@@ -7,6 +7,7 @@ final_test_report, which records each run in results/final_test.csv and refuses 
 model name twice unless force=True.
 """
 
+import itertools
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -85,6 +86,55 @@ def evaluate_on_validation(name: str, model, meta: pd.DataFrame, X: pd.DataFrame
     return row, model
 
 
+def evaluate_train_val(name: str, model, meta: pd.DataFrame, X: pd.DataFrame, y: pd.Series) -> tuple[dict, object, np.ndarray]:
+    """Fit on train; threshold = F1-optimal on VALIDATION; report train and validation at that frozen threshold.
+
+    Returns (row, fitted model, validation scores). Row keys are prefixed train_ / val_, plus the
+    overfitting gaps (train minus validation) and the frozen threshold. Only train and validation
+    rows are ever read (split_rows refuses test).
+    """
+    fit_on_train(model, meta, X, y)
+    out = {"model": name}
+    scored = {}
+    for tag, split in (("val", SPLIT_VAL), ("train", SPLIT_TRAIN)):
+        rows = split_rows(meta, split)
+        scored[tag] = (y.loc[rows].to_numpy(), scores(model, X.loc[rows]))
+    yv, sv = scored["val"]
+    threshold, _ = f1_optimal_threshold(yv, sv)
+    out["threshold"] = threshold
+    for tag in ("train", "val"):
+        yy, ss = scored[tag]
+        m = {**ranking_metrics(yy, ss), **threshold_metrics(yy, ss, threshold)}
+        m["pr_auc_over_base_rate"] = m["pr_auc"] / m["base_rate"]
+        out.update({f"{tag}_{k}": v for k, v in m.items()})
+    for k in ("pr_auc", "roc_auc", "f1"):
+        out[f"gap_{k}"] = out[f"train_{k}"] - out[f"val_{k}"]
+    return out, model, sv
+
+
+def param_variants(grid: dict) -> list[dict]:
+    """All combinations of a {param: values} grid, in a fixed order (first parameter varies slowest)."""
+    keys = list(grid)
+    return [dict(zip(keys, combo)) for combo in itertools.product(*(grid[k] for k in keys))]
+
+
+def tune_on_validation(name: str, make_model, grid: dict, meta: pd.DataFrame, X: pd.DataFrame,
+                       y: pd.Series, fixed: dict | None = None) -> tuple[pd.DataFrame, dict]:
+    """Try every combination in `grid` (fixed params added), fitting on train and scoring on VALIDATION.
+
+    Returns (table with one row per variant incl. its params, best params). The best variant has the
+    highest validation PR-AUC; ties go to the earlier variant. Test rows are never read.
+    """
+    rows = []
+    for i, params in enumerate(param_variants(grid)):
+        row, _, _ = evaluate_train_val(name, make_model(**params, **(fixed or {})), meta, X, y)
+        rows.append({"variant": i, **{f"param_{k}": v for k, v in params.items()}, **row})
+    table = pd.DataFrame(rows)
+    best = int(table["val_pr_auc"].to_numpy().argmax())        # first maximum
+    table["chosen"] = table.index == best
+    return table, param_variants(grid)[best]
+
+
 def race_bootstrap_indices(race_ids, B: int = config.BOOTSTRAP_B, seed: int = config.RANDOM_SEED):
     """Yield B arrays of row positions, each built by resampling whole races with replacement."""
     race_ids = np.asarray(race_ids)
@@ -115,6 +165,38 @@ def race_bootstrap_ci(y, s, race_ids, B: int = config.BOOTSTRAP_B, seed: int = c
     lo, hi = (1 - level) / 2 * 100, (1 + level) / 2 * 100
     return {"pr_auc_ci": tuple(np.percentile(pr, [lo, hi])), "roc_auc_ci": tuple(np.percentile(roc, [lo, hi])),
             "B": B, "skipped": skipped}
+
+
+def paired_race_bootstrap(y, scores_by_model: dict[str, np.ndarray], race_ids, pairs: list[tuple[str, str]],
+                          B: int = config.BOOTSTRAP_B, seed: int = config.RANDOM_SEED, level: float = 0.95) -> pd.DataFrame:
+    """Paired race-level bootstrap of the PR-AUC difference (a minus b) for each (a, b) in pairs.
+
+    The SAME resampled races are used for both models in every resample, so the interval reflects
+    the difference between the models rather than the noise of each. Resamples with one class are
+    skipped for all models. Rows: point estimate, percentile CI, and the share of resamples with a > b.
+    """
+    y = np.asarray(y)
+    s = {k: np.asarray(v) for k, v in scores_by_model.items()}
+    needed = {m for pair in pairs for m in pair}
+    diffs = {pair: [] for pair in pairs}
+    skipped = 0
+    for idx in race_bootstrap_indices(race_ids, B, seed):
+        yb = y[idx]
+        if yb.min() == yb.max():
+            skipped += 1
+            continue
+        ap = {m: average_precision_score(yb, s[m][idx]) for m in needed}
+        for a, b in pairs:
+            diffs[(a, b)].append(ap[a] - ap[b])
+    lo, hi = (1 - level) / 2 * 100, (1 + level) / 2 * 100
+    rows = []
+    for a, b in pairs:
+        d = np.asarray(diffs[(a, b)])
+        rows.append({"model": a, "versus": b,
+                     "pr_auc_diff": float(average_precision_score(y, s[a]) - average_precision_score(y, s[b])),
+                     "ci_low": float(np.percentile(d, lo)), "ci_high": float(np.percentile(d, hi)),
+                     "share_a_better": float((d > 0).mean()), "B": B, "skipped": skipped})
+    return pd.DataFrame(rows)
 
 
 def final_test_report(model_name: str, model, meta: pd.DataFrame, X: pd.DataFrame, y: pd.Series,
