@@ -254,10 +254,16 @@ def test_4_no_forbidden_columns_in_x(real):
 @pytest.mark.skipif(not RAW_PRESENT, reason="raw data not available")
 def test_5_rows_identical_when_built_on_data_up_to_r(real):
     tables, rc, meta, X, y = real
-    ids = [race_id(meta, 2023, 1), race_id(meta, 2012, 10), race_id(meta, 2021, 11),
-           int(meta.sort_values(["year", "round"])["raceId"].iloc[-1])]
-    out = L.prefix_invariance_check(tables, rc, ids, full=(meta, X, y))
-    assert out["identical"].all(), out
+    sample = L.prefix_race_sample(meta, tables, n=30)
+    assert len(sample) == 30 and sample["raceId"].is_unique
+    reasons = " ".join(sample["reason"])
+    for must in ("round 1 of 1950", "first race of rb (2024)", "first race of alpine (2021)",
+                 "first race of aston_martin (2021)", f"last race of {config.TRAIN_END_YEAR}",
+                 f"first race of {config.VAL_YEARS[0]}", f"first race of {config.TEST_START_YEAR}",
+                 "last race in the data"):
+        assert must in reasons, must
+    out = L.prefix_invariance_check(tables, rc, sample["raceId"].tolist(), full=(meta, X, y))
+    assert len(out) == 30 and out["identical"].all(), out[~out["identical"]]
 
 
 @pytest.mark.skipif(not RAW_PRESENT, reason="raw data not available")

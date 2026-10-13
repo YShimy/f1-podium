@@ -179,6 +179,56 @@ def prefix_invariance_check(tables, results_clean, race_ids, full=None) -> pd.Da
     return pd.DataFrame(rows)
 
 
+PREFIX_ROUND1_SEASONS = (1950, 1958, 1970, 1982, 1990, 2003, 2010, 2014)
+# First race of a constructor after a lineage rename: (constructorRef, season).
+PREFIX_RENAMES = (
+    ("bar", 1999), ("honda", 2006), ("brawn", 2009), ("mercedes", 2010),
+    ("mf1", 2006), ("spyker", 2007), ("force_india", 2008), ("racing_point", 2019), ("aston_martin", 2021),
+    ("toro_rosso", 2006), ("alphatauri", 2020), ("rb", 2024),
+    ("jaguar", 2000), ("red_bull", 2005),
+    ("benetton", 1986), ("renault", 2002), ("lotus_f1", 2012), ("renault", 2016), ("alpine", 2021),
+    ("bmw_sauber", 2006), ("sauber", 2010), ("alfa", 2019),
+    ("marussia", 2012), ("manor", 2015), ("caterham", 2012),
+)
+
+
+def prefix_race_sample(meta: pd.DataFrame, tables: dict, n: int = 30, seed: int = config.RANDOM_SEED) -> pd.DataFrame:
+    """Deterministic list of n races for the prefix-invariance check, with the reason each was chosen.
+
+    Required: round 1 of PREFIX_ROUND1_SEASONS, the first race after each rename in PREFIX_RENAMES, the
+    last race of the training split, the first race of validation and of test, and the last race in
+    the data. Duplicates are merged (reasons joined); the rest is filled with seeded mid-season races.
+    Raises if the required races alone exceed n.
+    """
+    races = meta[["raceId", "year", "round"]].drop_duplicates("raceId").sort_values(["year", "round"])
+    refs = tables["constructors"].set_index("constructorRef")["constructorId"]
+    chosen: dict[int, list[str]] = {}
+
+    def add(race_id, reason):
+        chosen.setdefault(int(race_id), []).append(reason)
+
+    for yr in PREFIX_ROUND1_SEASONS:
+        add(races.loc[(races["year"] == yr) & (races["round"] == races.loc[races["year"] == yr, "round"].min()),
+                      "raceId"].iloc[0], f"round 1 of {yr}")
+    for ref, yr in PREFIX_RENAMES:
+        rows = meta[(meta["year"] == yr) & (meta["constructorId"] == refs[ref])].sort_values("round")
+        if rows.empty:
+            raise AssertionError(f"{ref} has no race in {yr}")
+        add(rows["raceId"].iloc[0], f"first race of {ref} ({yr})")
+    add(races[races["year"] == config.TRAIN_END_YEAR]["raceId"].iloc[-1], f"last race of {config.TRAIN_END_YEAR}")
+    add(races[races["year"] == config.VAL_YEARS[0]]["raceId"].iloc[0], f"first race of {config.VAL_YEARS[0]}")
+    add(races[races["year"] == config.TEST_START_YEAR]["raceId"].iloc[0], f"first race of {config.TEST_START_YEAR}")
+    add(races["raceId"].iloc[-1], "last race in the data")
+    if len(chosen) > n:
+        raise AssertionError(f"{len(chosen)} required races exceed n = {n}")
+
+    rest = races[~races["raceId"].isin(chosen) & (races["round"] > 1)]
+    for race_id in rest.sample(n=n - len(chosen), random_state=seed)["raceId"]:
+        add(race_id, "random mid-season race")
+    out = races[races["raceId"].isin(chosen)].assign(reason=lambda d: d["raceId"].map(lambda r: "; ".join(chosen[r])))
+    return out.reset_index(drop=True)
+
+
 def split_check(meta: pd.DataFrame) -> dict:
     years = {s: meta.loc[meta["split"] == s, "year"] for s in F.SPLITS}
     keys = {s: set(map(tuple, meta.loc[meta["split"] == s, ["raceId", "driverId"]].to_numpy())) for s in F.SPLITS}
