@@ -7,7 +7,9 @@ final_test_report, which records each run in results/final_test.csv and refuses 
 model name twice unless force=True.
 """
 
+import hashlib
 import itertools
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -221,13 +223,35 @@ def paired_race_bootstrap(y, scores_by_model: dict[str, np.ndarray], race_ids, p
     return pd.DataFrame(rows)
 
 
+def freeze_hash(frozen: dict) -> str:
+    """Short SHA-256 of the canonical JSON of the frozen choices (keys sorted), for citing in the report."""
+    text = json.dumps(frozen, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def reset_final_test_log(results_dir: Path | None = None) -> int:
+    """Delete <results_dir>/final_test.csv at the start of a notebook run; return how many rows it had.
+
+    The log is the per-run lock of final_test_report: within one run a model name can be scored once.
+    Resetting it at the start of every run (Setup cell) makes "Run All" repeatable.
+    """
+    path = Path(config.RESULTS_DIR if results_dir is None else results_dir) / FINAL_TEST_FILE
+    if not path.exists():
+        return 0
+    n = len(pd.read_csv(path))
+    path.unlink()
+    return n
+
+
 def final_test_report(model_name: str, model, meta: pd.DataFrame, X: pd.DataFrame, y: pd.Series,
                       threshold: float, results_dir: Path | None = None, force: bool = False,
-                      src_commit: str | None = None) -> dict:
+                      src_commit: str | None = None, return_scores: bool = False):
     """THE ONLY place the test split is scored. Appends one row to <results_dir>/final_test.csv.
 
     `model` must already be fitted (on train) and `threshold` frozen on validation. Raises if
     `model_name` already has a row, unless force=True (the new row is appended; the old one is kept).
+    Returns the record, or (record, frame) with return_scores=True: one row per test row with raceId,
+    y and score, for the test curves, so no other code path reads test rows.
     """
     path = Path(config.RESULTS_DIR if results_dir is None else results_dir) / FINAL_TEST_FILE
     previous = pd.read_csv(path) if path.exists() else pd.DataFrame(columns=["model"])
@@ -245,4 +269,6 @@ def final_test_report(model_name: str, model, meta: pd.DataFrame, X: pd.DataFram
            **threshold_metrics(yt, st, threshold), "forced": bool(force)}
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([rec]).to_csv(path, mode="a", header=not path.exists(), index=False)
+    if return_scores:
+        return rec, pd.DataFrame({"raceId": meta.loc[rows, "raceId"], "y": yt, "score": st}, index=rows)
     return rec

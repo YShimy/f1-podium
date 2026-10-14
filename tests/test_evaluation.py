@@ -99,6 +99,44 @@ def test_final_test_report_refuses_to_run_twice(tmp_path):
     assert log["model"].tolist() == ["grid", "other", "grid"] and log["forced"].tolist() == [False, False, True]
 
 
+def test_reset_gives_a_fresh_run_and_the_lock_still_holds_within_a_run(tmp_path):
+    meta, X, y = synthetic_table()
+    model = E.fit_on_train(M.GridBaseline(), meta, X, y)
+    E.final_test_report("grid", model, meta, X, y, threshold=-3.0, results_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="already evaluated"):                 # same run: refused
+        E.final_test_report("grid", model, meta, X, y, threshold=-3.0, results_dir=tmp_path)
+    assert E.reset_final_test_log(tmp_path) == 1                                # next run starts here
+    assert not (tmp_path / E.FINAL_TEST_FILE).exists()
+    E.final_test_report("grid", model, meta, X, y, threshold=-3.0, results_dir=tmp_path)
+    assert pd.read_csv(tmp_path / E.FINAL_TEST_FILE)["model"].tolist() == ["grid"]
+    with pytest.raises(RuntimeError, match="already evaluated"):                 # and locked again
+        E.final_test_report("grid", model, meta, X, y, threshold=-3.0, results_dir=tmp_path)
+
+
+def test_reset_without_a_log_is_a_no_op(tmp_path):
+    assert E.reset_final_test_log(tmp_path) == 0
+
+
+def test_final_test_report_can_return_the_test_scores(tmp_path):
+    meta, X, y = synthetic_table()
+    model = E.fit_on_train(M.logistic_baseline(), meta, X, y)
+    rec, frame = E.final_test_report("lr", model, meta, X, y, threshold=0.5, results_dir=tmp_path,
+                                     return_scores=True)
+    test = meta.index[meta["split"] == "test"]
+    pd.testing.assert_index_equal(frame.index, test)
+    np.testing.assert_array_equal(frame["score"], E.scores(model, X.loc[test]))
+    np.testing.assert_array_equal(frame["y"], y.loc[test])
+    assert rec["n"] == len(frame) and rec["pr_auc"] == average_precision_score(frame["y"], frame["score"])
+
+
+def test_freeze_hash_is_stable_and_sensitive():
+    a = {"thresholds": {"lr": 0.2763}, "features": ["grid_filled", "has_quali"], "selected": "lr"}
+    b = {"selected": "lr", "features": ["grid_filled", "has_quali"], "thresholds": {"lr": 0.2763}}  # key order
+    assert E.freeze_hash(a) == E.freeze_hash(b) and len(E.freeze_hash(a)) == 12
+    assert E.freeze_hash(a) != E.freeze_hash({**a, "selected": "rf"})
+    assert E.freeze_hash(a) != E.freeze_hash({**a, "thresholds": {"lr": 0.2764}})
+
+
 # --- 4. race-level bootstrap -------------------------------------------------------------------------
 
 def test_bootstrap_resamples_whole_races():
