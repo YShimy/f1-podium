@@ -41,7 +41,7 @@ Goal: for each driver in each race, predict whether they finish on the podium
 
 Sections: **1** Setup, **2** Data Loading, **3** Raw Data Audit, **4** Audit follow-ups,
 **5** Findings → open decisions, **6** Cleaning, **7** Post-cleaning EDA, **8** Data-engineering questions,
-**9** Modeling table, **10** Evaluation harness and baselines, **11** Tree models and model comparison,
+**9** Modeling table and feature evidence, **10** Evaluation harness and baselines, **11** Tree models and model comparison,
 **12** Shallow neural network, **13** Experiments (training window, preprocessing, ablation), **14** Final test evaluation, **15** Inference for one record, **16** Explainability.
 Sections 3–4 only *measure* the raw data;
 cleaning happens only in section 6, following decisions recorded in the notebook.
@@ -2140,6 +2140,231 @@ display(standings.pivot(index="decade", columns="who", values=["mismatches", "ro
 - **Teammates:** constructor features are built from one row per (lineage, race), shifted before rolling. A synthetic
   test in `tests/test_features.py` puts both teammates on the podium in round 1 and checks that none of their round-1
   constructor features see it."""),
+
+    md("""### 9.6 Feature selection and preprocessing evidence (train rows only)
+
+**How the features were actually chosen.** The 21 features were motivated **before** any modeling, by domain reasoning
+(what decides a podium: starting position, car and driver strength, recent form, reliability, home support) and by the
+**leakage constraint** (each value must be known after qualifying and before lights out; see 9.2 and 9.5). They were
+**not** selected from the plots below. This subsection *checks* each group against the training data. The validation
+ablation (13.4) then tests what each group adds to a fitted model, and the explainability section (16) shows how the final
+model relies on them.
+
+**Only training rows (1950–2019) are used here** for every statistic, plot and fitted transformer, so nothing in this
+subsection looks at validation or test.
+
+| group | columns | hypothesis (domain reason) | available at the cutoff because |
+|---|---|---|---|
+| grid | `grid_filled`, `pit_lane_start` | the starting position is the strongest single predictor: overtaking is hard, and the front of the grid is where the fast cars are | the grid is set before the start |
+| qualifying | `quali_position`, `has_quali` | one-lap pace shows the car's raw speed; it can differ from the grid after penalties | qualifying ends before the race |
+| season standings | `drv_/con_points_before`, `drv_/con_rank_before`, `is_round_1` | the season so far shows which cars and drivers are strong *this year* | only rounds before this race are counted |
+| driver form | `drv_podium_rate_last3/5`, `drv_mean_pos_last3/5`, `drv_races_before` | recent results carry over between races; experience helps | only earlier starts, ordered by (year, round) |
+| constructor form | `con_podium_rate_last3/5`, `con_mean_pos_last3/5`, `con_races_before` | the same for the team: both cars, recent races | only earlier races |
+| reliability | `con_mech_rate_last10` | cars that keep breaking down finish fewer races, so they score fewer podiums | only earlier races' statuses |
+| home | `is_home` | home support or familiarity might help (section 8, Q2, tested this) | static: nationality and circuit country |"""),
+    code("""import time
+from f1podium import eda
+from f1podium import evaluation as ev
+from f1podium import models as mdl
+
+t0_96 = time.perf_counter()
+train_96 = ev.split_rows(meta, "train")
+assert set(meta.loc[train_96, "split"]) == {"train"} and meta.loc[train_96, "year"].max() <= config.TRAIN_END_YEAR
+Xtr96, ytr96 = X.loc[train_96], y.loc[train_96]
+base_96 = ytr96.mean()
+print(f"train rows: {len(Xtr96):,} ({meta.loc[train_96, 'year'].min()}–{meta.loc[train_96, 'year'].max()}), "
+      f"podium base rate {base_96:.3f}")
+
+POS_BINS, POS_LABELS = [0, 1, 3, 6, 10, np.inf], ["1", "2–3", "4–6", "7–10", "11+"]
+grid_no_pit = Xtr96["grid_filled"].where(Xtr96["pit_lane_start"] == 0).rename("grid (pit-lane starts separate)")
+panels = {
+    "grid: starting position": eda.rate_by_bins(grid_no_pit, ytr96, bins=POS_BINS, labels=POS_LABELS)
+        .rename(index={eda.MISSING_BUCKET: "pit lane"}),
+    "qualifying: qualifying position": eda.rate_by_bins(Xtr96["quali_position"], ytr96, bins=POS_BINS,
+                                                        labels=POS_LABELS).rename(index={eda.MISSING_BUCKET: "no quali"}),
+    "standings: driver rank before": eda.rate_by_bins(Xtr96["drv_rank_before"], ytr96, bins=POS_BINS,
+                                                      labels=POS_LABELS).rename(index={eda.MISSING_BUCKET: "round 1"}),
+    "standings: constructor rank before": eda.rate_by_bins(Xtr96["con_rank_before"], ytr96, bins=POS_BINS,
+                                                           labels=POS_LABELS).rename(index={eda.MISSING_BUCKET: "round 1"}),
+    "standings: driver points before (quantile bins)": eda.rate_by_bins(Xtr96["drv_points_before"], ytr96, q=10),
+    "driver form: podium rate, last 5 starts (quantile bins)": eda.rate_by_bins(Xtr96["drv_podium_rate_last5"], ytr96,
+                                                                               q=10).rename(index={eda.MISSING_BUCKET: "debut"}),
+    "constructor form: podium rate, last 5 races (quantile bins)": eda.rate_by_bins(
+        Xtr96["con_podium_rate_last5"], ytr96, q=10).rename(index={eda.MISSING_BUCKET: "first race"}),
+    "reliability: mech. retirement rate, last 10 (quantile bins)": eda.rate_by_bins(
+        Xtr96["con_mech_rate_last10"], ytr96, q=10).rename(index={eda.MISSING_BUCKET: "first race"}),
+    "home: home vs away": eda.rate_by_bins(Xtr96["is_home"], ytr96, bins=[-0.5, 0.5, 1.5], labels=["away", "home"]),
+}
+for t in panels.values():
+    assert t["n"].sum() == len(Xtr96)                     # every training row in exactly one bucket
+
+fig, axes = plt.subplots(3, 3, figsize=(16, 13), facecolor=plots.SURFACE)
+for ax, (title, t) in zip(axes.ravel(), panels.items()):
+    ax.set_facecolor(plots.SURFACE)
+    labels = [str(i) for i in t.index]
+    colors_b = [plots.INK_MUTED if l in {"pit lane", "no quali", "round 1", "debut", "first race"} else plots.SERIES[0]
+                for l in labels]
+    ax.bar(range(len(t)), t["rate"], color=colors_b)
+    ax.axhline(base_96, color=plots.SERIES[1], linewidth=1, linestyle=":")
+    for k, (r, n) in enumerate(zip(t["rate"], t["n"])):
+        ax.text(k, r + 0.01, f"n={n:,}", ha="center", fontsize=7, color=plots.INK_MUTED)
+    ax.set_xticks(range(len(t)), labels, rotation=35 if len(labels) > 5 else 0, ha="right" if len(labels) > 5 else "center",
+                  fontsize=8)
+    ax.set_ylim(0, 1)
+    plots.style_axes(ax, title, ylabel="podium rate (train)", percent=True)
+fig.suptitle(f"Podium rate by feature bucket, TRAIN rows 1950–2019 (dotted: base rate {base_96:.1%}; grey: missing / special)",
+             x=0.01, ha="left", fontsize=13)
+fig.tight_layout()
+plt.show()
+evidence = pd.concat({k: t for k, t in panels.items()}, names=["panel", "bucket"])
+with pd.option_context("display.max_rows", 120):
+    display(evidence.style.format({"rate": "{:.1%}", "n": "{:,}"}))"""),
+    md("""**What the training data show, group by group, and the decision.** Rates are podium shares in each bucket (base rate
+13.4%). The "quantile bins" collapse to fewer than ten buckets where many rows share a value (most drivers have 0
+podiums in their last five starts), so the bucket edges are printed rather than called deciles.
+
+| group | evidence on train (plot above) | decision |
+|---|---|---|
+| grid | Strong and monotone: pole 62.3%, P2–3 50.0%, P4–6 26.4%, P7–10 9.5%, P11+ 1.6%; pit-lane starts 0 of 73. | **keep** (frozen model). The dominant signal, also in 13.4 and 16. |
+| qualifying | Even steeper where it exists: pole 75.5% → P11+ 1.4%. Rows without qualifying (63% of train, mostly before 1994) sit at 13.0%, about the base rate, so `has_quali` marks *where* the position is informative. | **keep**. Nearly a copy of the grid (ρ = 0.98, 9.7), which is why dropping it alone costs little in 13.4. |
+| season standings | Monotone in rank: driver leader 58.0% → 11th+ 2.1%; constructor leader 44.9% → 11th+ 0.8%; points: ≤ 2 pts 4.9% → > 39 pts 40.4%. Round 1 (no standings yet) sits at 14.0%, which is why `is_round_1` flags it. | **keep**. Second-strongest group in the validation permutation test (16.2). |
+| driver form | Podium share over the last 5 starts: ≤ 0.2 → 6.6%, (0.2, 0.6] → 38.8%, > 0.6 → 58.4%; debutants 2.5%. | **keep**. Mostly redundant with standings and constructor form (9.7), and adds nothing measurable on validation (13.4). Kept because it is cheap, leakage-checked and frozen. |
+| constructor form | Team podium share over the last 5 races: ≤ 0.1 → 3.8% rising to > 0.42 → 49.2%. | **keep**, same caveat as driver form (dropping it scored +0.006 on validation, within noise). |
+| reliability | Monotone the expected way: lowest mechanical-retirement rate 20.6% → highest 5.6%. | **keep** as frozen. The association is real on train but adds nothing measurable on top of the other groups on validation (13.4, 16.2); a candidate for a simpler model. |
+| home | Raw rates: home 11.1% vs away 13.6% (*lower* at home). Q2 (section 8) found no home effect once the grid bucket is held fixed. | **keep** as frozen; no evidence that it helps (13.4: ±0.001). A candidate for removal. |
+
+**Reading.** Every group except home shows a clear, monotone association with podiums in the training years, in the
+direction the hypothesis predicts. That supports the domain reasoning, but it does not show that a group adds information
+*beyond the others*. That is what the redundancy check (9.7) and the validation ablation (13.4) are for. None of these
+plots changed the feature list."""),
+
+    md("""### 9.7 Redundancy and univariate screening (train rows only)
+
+**Correlation heatmap.** Spearman rank correlation between the 21 features on training rows (pairwise complete rows,
+so a feature's missing values are left out of its pairs). Rank correlation is used because most features are counts,
+ranks and rates with skewed distributions. Pairs with |ρ| ≥ 0.7 are listed below the plot.
+
+**Univariate PR-AUC (exploratory screening).** Each feature *on its own* is used as a ranking score on its non-missing
+training rows, in whichever direction ranks podiums better. Because features differ in coverage (for example qualifying
+exists only for 37% of training rows), PR-AUC is divided by the podium rate *of those same rows* (lift). This is a
+screening view: it ignores interactions and redundancy, and it was not used to choose the features."""),
+    code("""corr96 = Xtr96.corr(method="spearman")
+fig, ax = plt.subplots(figsize=(12, 10.5), facecolor=plots.SURFACE)
+im = ax.imshow(corr96.to_numpy(), cmap="RdBu_r", vmin=-1, vmax=1)
+ax.set_xticks(range(len(corr96)), corr96.columns, rotation=90, fontsize=8)
+ax.set_yticks(range(len(corr96)), corr96.index, fontsize=8)
+for (i, j), v in np.ndenumerate(corr96.to_numpy()):
+    if i != j and abs(v) >= 0.5:
+        ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=5.5, color="white" if abs(v) > 0.75 else plots.INK)
+fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02, label="Spearman ρ (train)")
+ax.set_title("Spearman correlation between the 21 features (train rows; |ρ| ≥ 0.5 annotated)", loc="left", fontsize=12)
+fig.tight_layout()
+plt.show()
+upper = corr96.where(np.triu(np.ones(corr96.shape, dtype=bool), k=1)).stack()
+group_of = {c: g for g, cols in config.FEATURE_GROUPS.items() for c in cols}
+strong = upper[upper.abs() >= 0.7].sort_values(key=abs, ascending=False).rename("spearman").to_frame()
+strong["groups"] = [f"{group_of[a]} / {group_of[b]}" for a, b in strong.index]
+print(f"pairs with |ρ| ≥ 0.7: {len(strong)} (of {len(upper)})")
+display(strong.round(3))"""),
+    code("""uni96 = eda.univariate_pr_auc(Xtr96, ytr96)
+uni96["group"] = uni96.index.map(group_of)
+display(uni96[["group", "coverage", "base_rate", "pr_auc", "lift", "direction"]].style.format(
+    {"coverage": "{:.0%}", "base_rate": "{:.1%}", "pr_auc": "{:.3f}", "lift": "{:.2f}x"}))
+fig, ax = plots.new_figure(height=6.6)
+t = uni96.iloc[::-1]
+group_colors = dict(zip(config.FEATURE_GROUPS, plots.SERIES + [plots.INK_MUTED, "#8a4fc7", "#c75f8a"]))
+ax.barh(range(len(t)), t["lift"], color=[group_colors[g] for g in t["group"]])
+ax.axvline(1, color=plots.INK_MUTED, linewidth=1, linestyle=":")
+ax.set_yticks(range(len(t)), [f"{c} ({cov:.0%})" for c, cov in zip(t.index, t["coverage"])], fontsize=8)
+plots.style_axes(ax, "Univariate PR-AUC ÷ base rate on train (each feature alone; coverage in brackets)",
+                 xlabel="lift over the podium rate of the rows where the feature is present (1 = no skill)")
+ax.grid(axis="x", color=plots.GRIDLINE, linewidth=0.8)
+handles = [plt.Rectangle((0, 0), 1, 1, color=group_colors[g]) for g in config.FEATURE_GROUPS]
+ax.legend(handles, list(config.FEATURE_GROUPS), frameon=False, fontsize=8, loc="lower right")
+fig.tight_layout()
+plt.show()"""),
+    md("""**What it shows.**
+- **Two redundant clusters.** 28 of the 207 feature pairs with a defined correlation have |ρ| ≥ 0.7 on train. Three
+  pairs are undefined, for example `has_quali` with `quali_position`: the flag is constant on the rows where the
+  position exists (the blank cell in the heatmap).
+  - **Starting order:** `grid_filled` and `quali_position` (ρ = 0.98).
+  - **Current strength:** standings, driver form and constructor form are all inter-correlated across groups, for
+    example constructor rank vs constructor podium rate (last 5) ρ = −0.79, driver vs constructor points 0.85, and
+    last 3 vs last 5 of the same rate 0.89–0.92.
+- **This explains the ablation (13.4):** dropping one group leaves its cluster partner in the model, so no single drop was
+  distinguishable from 0, while "grid only" and "grid + qualifying only" (which remove the whole strength cluster) were
+  clearly worse. It also explains why permutation importance and SHAP split credit within these clusters (16).
+- **Flags and context are nearly uncorrelated with everything else:** `pit_lane_start`, `is_round_1`, `is_home`. The
+  exceptions are `has_quali`, which correlates with `con_races_before` (0.56) and `con_mech_rate_last10` (−0.57), because all
+  three track the era.
+
+**Univariate PR-AUC (each feature alone, train).**
+- **Strongest single rankers:** `quali_position` 4.26× its base rate (on the 37% of rows that have it), `grid_filled`
+  3.71×, then `drv_rank_before` 3.26× and the constructor-form rates 2.9–3.2×.
+- **Weaker alone:** career length (`con_races_before` 1.64×, `drv_races_before` 1.50×) and reliability (1.36×).
+- **The binary flags score about 1.0×** (`has_quali`, `is_home`, `is_round_1`, `pit_lane_start`). Most of them are not meant
+  to rank on their own: they tell the model when another feature is missing or special.
+- **What this does NOT show:** whether a feature adds anything *given the others*. Screening was not used to choose or drop
+  features; a feature that is weak alone can matter jointly, and a strong one can be redundant."""),
+
+    md("""### 9.8 Preprocessing, before and after (train rows only)
+
+The preprocessing used by the scale-sensitive models (logistic regression, the neural network) is `models.build_preprocessor`:
+**median imputation, then standardisation** (subtract the training mean, divide by the training standard deviation).
+Here it is fitted on the training rows exactly as inside the model pipelines (section 10 onwards fits the same steps on
+the same rows), and three features are followed through the steps:
+- `quali_position`: has missing values, so imputation changes it;
+- `drv_points_before`: complete but strongly skewed (most drivers have few points);
+- `grid_filled`: complete and roughly uniform.
+
+The tree models use the imputation step only (no scaling); section 13.3 compares the two possible orders of the steps."""),
+    code("""prep96 = mdl.build_preprocessor(scale=True).fit(Xtr96)
+steps96 = prep96.named_transformers_["num"].named_steps
+imputed96 = pd.DataFrame(steps96["impute"].transform(Xtr96), index=Xtr96.index, columns=Xtr96.columns)
+scaled96 = prep96.transform(Xtr96)
+assert np.allclose(scaled96.to_numpy(), np.asarray(steps96["scale"].transform(imputed96)))
+cols96 = ["quali_position", "drv_points_before", "grid_filled"]
+stages = {"raw": Xtr96, "imputed (median)": imputed96, "imputed + scaled": scaled96}
+summary96 = pd.concat({
+    c: pd.DataFrame({s: {"missing": int(f[c].isna().sum()), "min": f[c].min(), "max": f[c].max(),
+                         "range": f[c].max() - f[c].min(), "mean": f[c].mean(), "SD": f[c].std(ddof=0)}
+                     for s, f in stages.items()}).T for c in cols96}, names=["feature", "stage"])
+summary96["value given to missing rows"] = [
+    (steps96["impute"].statistics_[list(Xtr96.columns).index(c)] if s == "imputed (median)" and Xtr96[c].isna().any() else
+     scaled96.loc[Xtr96[c].isna(), c].iloc[0] if s == "imputed + scaled" and Xtr96[c].isna().any() else np.nan)
+    for c, s in summary96.index]
+display(summary96.style.format("{:.3f}", na_rep="–").format({"missing": "{:,.0f}"}))
+
+fig, axes = plt.subplots(3, 3, figsize=(15, 10.5), facecolor=plots.SURFACE)
+for r, c in enumerate(cols96):
+    for k, (s, f) in enumerate(stages.items()):
+        ax = axes[r, k]
+        ax.set_facecolor(plots.SURFACE)
+        v = f[c].dropna()
+        ax.hist(v, bins=40, color=plots.SERIES[k], alpha=0.9)
+        ax.axvline(v.mean(), color=plots.INK, linewidth=1.1, linestyle="--")
+        m = 0.0 if abs(v.mean()) < 5e-3 else v.mean()                # avoid printing "-0.00"
+        plots.style_axes(ax, f"{c}: {s}\\nmean {m:.2f}, SD {v.std(ddof=0):.2f}, range {v.min():.2f} to {v.max():.2f}",
+                         ylabel="train rows" if k == 0 else None)
+        ax.title.set_fontsize(9.5)
+fig.tight_layout()
+plt.show()
+print(f"subsection 9.6–9.8 runtime: {time.perf_counter() - t0_96:.1f} s")"""),
+    md("""**What it shows** (statistics printed above, training rows).
+- **`quali_position` (63% missing, 14,276 rows):**
+  - **Raw (observed only):** mean 11.37, SD 6.36, range 1–28.
+  - **After median imputation:** the median 11 fills the gaps, so the mean barely moves (11.14) but the SD shrinks to 3.87.
+    The spike at 11 in the middle plot is the 14,276 imputed rows.
+  - **After scaling:** mean 0, SD 1, range −2.62 to 4.36; missing rows sit at −0.035.
+  - **Why `has_quali` exists:** imputation compresses the spread and turns "unknown" into "mid-field", so `has_quali` lets
+    the model tell the two apart.
+- **`drv_points_before` (no missing values):**
+  - **Imputation:** changes nothing.
+  - **Scaling:** maps 0–387 to −0.42 to 10.73. The distribution stays strongly right-skewed (most rows have 0–2 points),
+    because standardisation shifts and rescales a column but does not change its shape.
+- **`grid_filled` (no missing values):** imputation changes nothing, and scaling maps 1–34 to −1.60 to 3.22 (mean 0, SD 1).
+- **Leakage:** all statistics (median, mean, SD) are computed on training rows only. These are exactly the steps
+  `models.build_preprocessor` runs inside every pipeline from section 10 on, fitted on the same rows."""),
 
     md("""## 10. Evaluation harness and baselines (validation only)
 
