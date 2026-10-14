@@ -100,14 +100,16 @@ def linear_shap(pipeline, X_background: pd.DataFrame, X_explain: pd.DataFrame) -
     return _explanation(e.values, e.base_values, t, X_explain)
 
 
-def tree_shap(pipeline, X_background: pd.DataFrame, X_explain: pd.DataFrame, n_background: int = 500,
-              seed: int = config.RANDOM_SEED) -> shap.Explanation:
-    """Interventional TreeExplainer SHAP values (raw log-odds) of the HistGradientBoosting step.
+def tree_shap(pipeline, X_explain: pd.DataFrame) -> shap.Explanation:
+    """TreeExplainer SHAP values (raw log-odds) of the HistGradientBoosting step, tree-path-dependent algorithm.
 
-    Background: a seeded sample of n_background rows of X_background, passed through the pipeline's imputer.
+    The implicit background is the TRAINING data, through the number of training rows that reached each tree node.
+    Why not "interventional" with an explicit train sample: with shap 0.52 on the fitted section-11 model its
+    SHAP values did not add up to the model output (gap up to 0.29 log-odds on validation rows, with a correct base
+    value and with or without nudging values that sit exactly on split thresholds), whereas the path-dependent
+    values add up to 1e-14. shap's additivity check stays on, so a mismatch raises instead of passing silently.
     """
-    bg = transformed_frame(pipeline, X_background.sample(n=min(n_background, len(X_background)), random_state=seed))
-    explainer = shap.TreeExplainer(pipeline.named_steps["clf"], data=bg, feature_perturbation="interventional",
+    explainer = shap.TreeExplainer(pipeline.named_steps["clf"], feature_perturbation="tree_path_dependent",
                                    model_output="raw")
     t = transformed_frame(pipeline, X_explain)
     values = explainer.shap_values(t)

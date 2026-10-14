@@ -91,9 +91,23 @@ def test_linear_shap_reproduces_the_log_odds(fitted):
 def test_tree_shap_reproduces_the_log_odds(fitted):
     meta, X, y, _, hgb = fitted
     train, val = E.split_rows(meta, "train"), E.split_rows(meta, "validation")
-    expl = xai.tree_shap(hgb, X.loc[train], X.loc[val], n_background=30)
+    expl = xai.tree_shap(hgb, X.loc[val])
     raw = hgb.named_steps["clf"].decision_function(xai.transformed_frame(hgb, X.loc[val]))
-    np.testing.assert_allclose(expl.values.sum(axis=1) + expl.base_values, raw, atol=1e-4)
+    np.testing.assert_allclose(expl.values.sum(axis=1) + expl.base_values, raw, atol=1e-6)
+    assert expl.feature_names == F.FEATURES
+
+
+def test_tree_shap_adds_up_when_values_sit_on_split_thresholds():
+    # integer-valued features with many distinct values: HistGB then puts thresholds on data values (the case of
+    # the real model); path-dependent SHAP must still add up exactly
+    meta, X, y = synthetic_table()
+    X = X.copy()
+    X[F.FEATURES[2:]] = np.round(X[F.FEATURES[2:]] * 3)
+    hgb = E.fit_on_train(M.hist_gradient_boosting(max_iter=50, max_depth=3), meta, X, y)
+    val = E.split_rows(meta, "validation")
+    expl = xai.tree_shap(hgb, X.loc[val])
+    raw = hgb.named_steps["clf"].decision_function(xai.transformed_frame(hgb, X.loc[val]))
+    np.testing.assert_allclose(expl.values.sum(axis=1) + expl.base_values, raw, atol=1e-6)
 
 
 def test_transformed_frame_keeps_original_names(fitted):
