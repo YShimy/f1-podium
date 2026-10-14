@@ -3261,8 +3261,35 @@ for ax, metric, title in zip(axes, ["pr_auc", "roc_auc", "f1"], ["PR-AUC", "ROC-
     plots.style_axes(ax, title + (" (dotted: base rates; bars: test 95% CI)" if metric == "pr_auc" else ""))
 axes[0].legend(frameon=False, fontsize=9, labelcolor=plots.INK_MUTED, loc="upper left")
 fig.tight_layout()
-plt.show()
+plt.show()"""),
+
+    md("""### 14.4 Paired race bootstrap on test: final model vs the naive rules (reporting only)
+
+Same method as 11.5 / 12.4 (whole test races resampled, B = 1000, seed 42, the same resampled races for both models of
+a pair), applied to the test scores **already returned by the single `final_test_report` call per model**; test is
+not scored again. **No decision depends on this:** the final model was fixed before test was opened."""),
+    code("""ref_frame = test_frames["logistic regression"]
+for fr in test_frames.values():                                   # same test rows, same order, for every model
+    pd.testing.assert_index_equal(fr.index, ref_frame.index)
+    assert np.array_equal(fr["y"], ref_frame["y"]) and np.array_equal(fr["raceId"], ref_frame["raceId"])
+test_pairs = [("logistic regression", "naive: -grid"), ("logistic regression", "naive: -quali (fallback -grid)")]
+test_boot = ev.paired_race_bootstrap(ref_frame["y"].to_numpy(), {m: test_frames[m]["score"].to_numpy() for m in
+                                                                 test_frames}, ref_frame["raceId"].to_numpy(),
+                                     test_pairs, B=config.BOOTSTRAP_B, seed=config.RANDOM_SEED)
+test_boot["interval excludes 0"] = (test_boot["ci_low"] > 0) | (test_boot["ci_high"] < 0)
+assert np.isclose(test_boot.loc[0, "pr_auc_diff"],
+                  test_recs["logistic regression"]["pr_auc"] - test_recs["naive: -grid"]["pr_auc"])
+display(test_boot.set_index(["model", "versus"])[["pr_auc_diff", "ci_low", "ci_high", "share_a_better",
+                                                  "interval excludes 0"]]
+        .style.format({"pr_auc_diff": "{:+.3f}", "ci_low": "{:+.3f}", "ci_high": "{:+.3f}",
+                       "share_a_better": "{:.1%}"}))
+print("test races:", ref_frame["raceId"].nunique(), "| resamples:", int(test_boot["B"].iloc[0]),
+      "| skipped (single class):", int(test_boot["skipped"].iloc[0]))
+assert len(pd.read_csv(final_test_path)) == len(test_models)       # still one test run per model
 print(f"section 14 runtime: {time.perf_counter() - t0_14:.1f} s")"""),
+    md("""**Interpretation (reporting only).** On the 68 test races the final model ranks podiums clearly better than both
+naive rules: +0.070 PR-AUC over −grid (95% CI +0.028 to +0.106) and +0.091 over −quali (+0.053 to +0.128), ahead in all
+1,000 resamples, which matches the validation result (+0.087 over −grid in 12.4); no decision was, or is, taken from it."""),
     md("""### 14.5 Results
 
 **Test set:** seasons 2022–2024, 68 races, 1,357 rows, 204 podiums, base rate 15.0% (train 13.4%, validation 15.0%).
@@ -3291,9 +3318,10 @@ Intervals are race-level bootstrap 95% CIs on test.
 - **Their order on test differs from validation:** logistic regression is highest on test (0.717), and the neural
   network, highest on validation (0.753), is lowest of the four on test (0.689, −0.064). This matches the warning in 12.3
   that its validation score was the best epoch of the best of 24 variants on the same rows, so it carried the most
-  selection optimism. The test intervals of the four learned models overlap widely. **No paired comparison is made on test**
-  because no decision is taken from it; the separation of the models was judged on validation (12.4), where they were
-  not distinguishable either.
+  selection optimism. The test intervals of the four learned models overlap widely. **No paired comparison between the
+  learned models is made on test** because no decision is taken from it; the separation of the models was judged on
+  validation (12.4), where they were not distinguishable either. The only paired test comparison (14.4, reporting only)
+  is the final model against the two naive rules.
 - **The qualifying rule falls below the grid rule on test** (0.626 vs 0.647), the reverse of validation (0.654 vs 0.639).
   The two rules differ only where grid penalties move cars, which is a small and noisy set of rows.
 
