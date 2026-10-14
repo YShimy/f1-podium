@@ -110,3 +110,22 @@ def test_autoreload_is_guarded_and_never_a_bare_magic():
     assert try_at < src.index('run_line_magic("load_ext"') < src.index("except Exception")
     assert 'print(f"autoreload unavailable: {exc}")' in src
     assert 'Path("/kaggle/input").exists()' in src
+
+
+def _code_cell_strings():
+    return [node.value for node in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+
+
+def test_setup_resets_the_test_log_at_the_start_of_every_run():
+    setup = [c for c in _code_cell_strings() if "PINNED = __PINS__" in c]
+    assert len(setup) == 1 and "reset_final_test_log()" in setup[0]
+
+
+def test_test_set_is_scored_only_in_section_14_after_the_freeze():
+    text = SCRIPT.read_text(encoding="utf-8")
+    calls = [i for i in range(len(text)) if text.startswith("ev.final_test_report(", i)]
+    assert len(calls) >= 1
+    freeze = text.index("FREEZE_HASH = ev.freeze_hash(")
+    section_14 = text.index('md("""## 14.')
+    assert all(section_14 < freeze < i for i in calls)

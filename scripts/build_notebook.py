@@ -42,7 +42,7 @@ Goal: for each driver in each race, predict whether they finish on the podium
 Sections: **1** Setup, **2** Data Loading, **3** Raw Data Audit, **4** Audit follow-ups,
 **5** Findings → open decisions, **6** Cleaning, **7** Post-cleaning EDA, **8** Data-engineering questions,
 **9** Modeling table, **10** Evaluation harness and baselines, **11** Tree models and model comparison,
-**12** Shallow neural network, **13** Experiments (training window, preprocessing, ablation).
+**12** Shallow neural network, **13** Experiments (training window, preprocessing, ablation), **14** Final test evaluation.
 Sections 3–4 only *measure* the raw data;
 cleaning happens only in section 6, following decisions recorded in the notebook.
 Reusable code lives in `src/f1podium/`."""),
@@ -175,7 +175,30 @@ print("src        :", SRC_DIR)
 print("raw data   :", config.RAW_DIR)
 print("split      : train <=", config.TRAIN_END_YEAR, "| val", config.VAL_YEARS,
       "| test >=", config.TEST_START_YEAR)
-print("seed       :", config.RANDOM_SEED)""".replace("__PINS__", repr(PINS))),
+print("seed       :", config.RANDOM_SEED)
+
+# Per-run test lock: final_test_report refuses a second call for the same model while this log exists, so the log
+# is reset at the start of every run. Within one run each model can still be scored on test only once (section 14).
+from f1podium.evaluation import reset_final_test_log
+_removed = reset_final_test_log()
+print(f"test log   : {config.RESULTS_DIR / 'final_test.csv'} reset for this run "
+      f"(removed {_removed} rows from a previous run)")
+
+def _local_commit():
+    # The commit recorded with each test result: the packaged src commit on Kaggle, else the local git HEAD.
+    import subprocess
+    try:
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                              cwd=SRC_DIR, check=True).stdout.strip()
+        # "-dirty" only if the scoring code itself (src/) has uncommitted changes; the notebook always
+        # differs from HEAD while it is being executed, so it is not counted.
+        dirty = subprocess.run(["git", "status", "--porcelain", "--", "."], capture_output=True, text=True,
+                               cwd=SRC_DIR, check=True).stdout.strip()
+        return head + ("-dirty" if dirty else "")
+    except Exception:
+        return None
+RUN_COMMIT = SRC_COMMIT or _local_commit()
+print("run commit :", RUN_COMMIT)""".replace("__PINS__", repr(PINS))),
 
     md("""## 2. Data Loading
 
@@ -2126,7 +2149,7 @@ display(standings.pivot(index="decade", columns="who", values=["mismatches", "ro
 - **Every choice is made on validation (2020–2021):** model comparison and the decision threshold (the F1-optimal
   threshold on validation, rule `score >= threshold`, ties to the higher threshold). Nothing is tuned yet.
 - **Test (2022–2024) is locked.** It is scored only by `final_test_report`, once per model name, which logs every run to
-  `results/final_test.csv` with race-level bootstrap 95% CIs. **It is not called in this notebook.**
+  `results/final_test.csv` with race-level bootstrap 95% CIs. **It is called only in section 14, once per model, after every choice is frozen.**
   `split_rows(meta, "test")` raises, so the development helpers cannot touch test rows.
 
 **Baselines**
@@ -2462,7 +2485,7 @@ plt.show()"""),
   their PR-AUC advantage comes from.
 - **The two rules draw flat steps** because their scores are whole grid positions with many ties.
 
-> **Test stays locked.** `final_test_report` has not been called, and `results/final_test.csv` does not exist. The
+> **Test stays locked.** `final_test_report` has not been called up to here (the Setup cell reset the log). The
 > choices above (model families, hyperparameters, class weights, thresholds) are all frozen from validation, so a later
 > one-off test evaluation is an honest estimate."""),
 
@@ -2681,7 +2704,7 @@ plt.show()"""),
 > readable coefficients; the tree ensembles are black boxes with importances; the network is the hardest to interpret.
 >
 > The rule uses validation data only. The chosen model is then fitted once on train, with its frozen threshold, and
-> evaluated on test once through `final_test_report`. **That has not happened in this notebook.**"""),
+> evaluated on test once through `final_test_report`. **That happens only in section 14, after the freeze.**"""),
     code("""simplicity = ["naive: -grid", "naive: -quali (fallback -grid)", "logistic regression", "random forest",
               "hist gradient boosting", "neural network"]
 best_name = cmp_all["val_pr_auc"].idxmax()
@@ -2706,7 +2729,7 @@ print("selected by the rule:", selected)"""),
   **logistic regression**, so **the rule selects logistic regression** (`class_weight=None`, validation threshold 0.276).
 - **How to read it:** this is the outcome of the rule on validation evidence, not a claim that logistic regression is
   more accurate. The data cannot separate the four learned models on 39 races; when evidence is a tie, the rule prefers
-  the model that can be explained and audited. Nothing has been evaluated on test. If you accept the rule as written,
+  the model that can be explained and audited. Nothing has been evaluated on test at this point. If you accept the rule as written,
   that choice and its frozen threshold are what the one-off test run would use."""),
 
     md("""## 13. Experiments (validation only)
@@ -3035,7 +3058,260 @@ print(f"test log unchanged by section 13: True | results/final_test.csv exists: 
 **Limits, again:** 39 validation races, so PR-AUC differences of about ±0.01–0.02 cannot be resolved. "Interval includes
 0" means not distinguishable at this size, not equal. If any variant were adopted *because* it scored best here, its
 validation score would be slightly optimistic; the honest number for the frozen model is the one-off test evaluation,
-which has not been run."""),
+which follows once, in section 14."""),
+
+    md("""## 14. Final test evaluation (run once)
+
+**Metrics.**
+- **Primary: PR-AUC (average precision).** Only 13–15% of driver-race rows are podiums (train 13.4%, validation 15.0%).
+  The task is to rank the few podium candidates above everyone else, and PR-AUC measures exactly that: how precise the
+  top of the ranking is at every recall level. Its no-skill level is the base rate (not 0.5), so it is always shown
+  next to the base rate and as a multiple of it.
+- **Secondary: ROC-AUC**, the probability that a random podium row is ranked above a random non-podium row. It is
+  threshold-free too, but the many easy negatives (back-markers) push it high for every model, so it separates models less.
+- **Secondary: F1, precision and recall at the validation-tuned threshold.** These describe a yes/no decision
+  ("predict podium") at one operating point. The threshold is the F1-optimal one **on validation**, frozen, and
+  applied unchanged to test, so test F1 is an honest out-of-sample number (unlike validation F1, which is optimistic).
+
+**What was decided before test was opened.**
+- **The final model was chosen by the 12.6 rule on validation only: logistic regression.** All six models are
+  scored here for comparison, but the final model does not depend on these numbers.
+- Every hyperparameter, class weight, threshold, the feature list and the training window were fixed in sections
+  10–13 from validation. **Nothing is tuned on test anywhere**, and the freeze cell below checks the frozen values
+  before scoring and again after it.
+- `final_test_report` is the only function that reads test rows. It refuses a second call for the same model within
+  one run (the log is reset by the Setup cell at the start of every run)."""),
+
+    md("""### 14.1 Freeze
+
+The values below are written out by hand (what sections 10–13 decided) and asserted against the live objects of
+this run. If anything had drifted, the cell would stop before the test split is opened. The hash identifies this exact
+set of choices so the report can cite it."""),
+    code("""import json, time
+t0_14 = time.perf_counter()
+FROZEN_EXPECTED = {
+    "features": ["grid_filled", "pit_lane_start", "quali_position", "has_quali", "is_round_1", "is_home",
+                 "drv_points_before", "drv_rank_before", "con_points_before", "con_rank_before",
+                 "drv_podium_rate_last3", "drv_podium_rate_last5", "drv_mean_pos_last3", "drv_mean_pos_last5",
+                 "drv_races_before", "con_podium_rate_last3", "con_podium_rate_last5", "con_mean_pos_last3",
+                 "con_mean_pos_last5", "con_races_before", "con_mech_rate_last10"],
+    "split": {"train": [1950, 2019], "validation": [2020, 2021], "test_from": 2022},
+    "logistic regression": {"solver": "lbfgs", "penalty": "l2", "C": 1.0, "max_iter": 1000, "class_weight": None,
+                            "random_state": 42},
+    "random forest": {"n_estimators": 500, "max_depth": 12, "min_samples_leaf": 20, "class_weight": None,
+                      "random_state": 42},
+    "hist gradient boosting": {"learning_rate": 0.03, "max_iter": 300, "max_depth": 3, "l2_regularization": 0.0,
+                               "class_weight": None, "random_state": 42},
+    "neural network": {"hidden_sizes": [32], "dropout": 0.0, "weight_decay": 0.0, "lr": 0.001, "batch_size": 256,
+                       "max_epochs": 100, "patience": 10, "seed": 42, "best_epoch": 47},
+    "thresholds": {"naive: -grid": -3.0, "naive: -quali (fallback -grid)": -3.0, "logistic regression": 0.276,
+                   "random forest": 0.288, "hist gradient boosting": 0.287, "neural network": 0.344},
+    "selected model": "logistic regression",
+}
+test_models = {**final_models, "neural network": nn_final}
+
+def live_freeze():
+    # The same quantities, read from the objects that will actually be scored.
+    clf = {m: test_models[m].named_steps["clf"].get_params() for m in
+           ("logistic regression", "random forest", "hist gradient boosting")}
+    nn_p = nn_final.get_params()
+    return {
+        "features": list(X.columns),
+        "split": {"train": [config.TRAIN_START_YEAR, config.TRAIN_END_YEAR], "validation": list(config.VAL_YEARS),
+                  "test_from": config.TEST_START_YEAR},
+        **{m: {k: clf[m][k] for k in FROZEN_EXPECTED[m]} for m in clf},
+        "neural network": {**{k: (list(nn_p[k]) if k == "hidden_sizes" else nn_p[k])
+                              for k in FROZEN_EXPECTED["neural network"] if k != "best_epoch"},
+                           "best_epoch": int(nn_final.best_epoch_)},
+        "thresholds": {m: round(float(cmp_all.loc[m, "threshold"]), 4) for m in test_models},
+        "selected model": selected,
+    }
+
+live = live_freeze()
+for key, expected in FROZEN_EXPECTED.items():
+    if key == "thresholds":
+        for m, t in expected.items():
+            assert abs(live[key][m] - t) < 5e-4, (m, live[key][m], t)
+    else:
+        assert live[key] == expected, (key, live[key], expected)
+# the fitted models are the ones evaluated on validation (inputs and validation scores unchanged)
+vrows_14 = ev.split_rows(meta, "validation")
+for m, model in test_models.items():
+    if hasattr(model, "named_steps"):
+        assert list(model.named_steps["prep"].get_feature_names_out()) == FROZEN_EXPECTED["features"]
+    stored = nn_val_scores if m == "neural network" else val_scores[m]
+    assert np.array_equal(ev.scores(model, X.loc[vrows_14]), stored), m
+assert list(nn_final.prep_.get_feature_names_out()) == FROZEN_EXPECTED["features"]
+assert not final_test_path.exists(), "the test log must be empty before section 14"
+
+FREEZE_HASH = ev.freeze_hash(live)
+freeze_view = pd.DataFrame({"frozen value": {
+    "features": f"{len(live['features'])} columns (sections 9 and 13.4)",
+    "training window": f"{live['split']['train'][0]}–{live['split']['train'][1]} (13.1)",
+    **{f"{m} config": json.dumps(live[m]) for m in ("logistic regression", "random forest",
+                                                   "hist gradient boosting", "neural network")},
+    **{f"threshold: {m}": f"{t:.4f}" for m, t in live["thresholds"].items()},
+    "final model (rule 12.6)": live["selected model"],
+}})
+with pd.option_context("display.max_colwidth", 140):
+    display(freeze_view)
+print("FREEZE_HASH =", FREEZE_HASH, "| run commit:", RUN_COMMIT)"""),
+
+    md("""### 14.2 Score every model on test, once
+
+Each model is passed to `final_test_report` exactly once, with its frozen validation threshold. The function logs
+each run (with race-level bootstrap 95% CIs, B = 1000, seed 42) to `results/final_test.csv`. A second call for the
+same model is refused, shown at the end of the cell. After scoring, the freeze is recomputed and must be unchanged."""),
+    code("""test_recs, test_frames = {}, {}
+for name, model in test_models.items():
+    test_recs[name], test_frames[name] = ev.final_test_report(
+        name, model, meta, X, y, threshold=float(cmp_all.loc[name, "threshold"]), src_commit=RUN_COMMIT,
+        return_scores=True)
+log = pd.read_csv(final_test_path)
+assert len(log) == len(test_models) and log["model"].is_unique and not log["forced"].any()
+
+try:
+    ev.final_test_report("logistic regression", test_models["logistic regression"], meta, X, y,
+                         threshold=float(cmp_all.loc["logistic regression", "threshold"]), src_commit=RUN_COMMIT)
+    raise AssertionError("a second test evaluation of the same model must be refused")
+except RuntimeError as exc:
+    print("second call refused, as intended:", str(exc).split(" (")[0])
+assert len(pd.read_csv(final_test_path)) == len(test_models)
+
+assert ev.freeze_hash(live_freeze()) == FREEZE_HASH, "test results must not change any frozen choice"
+tf = next(iter(test_frames.values()))
+test_years = sorted(meta.loc[tf.index, "year"].unique())
+print(f"test: seasons {test_years}, {tf['raceId'].nunique()} races, {len(tf)} rows, {int(tf['y'].sum())} podiums, "
+      f"base rate {tf['y'].mean():.3f}")
+print("freeze unchanged after scoring:", FREEZE_HASH)"""),
+
+    md("""### 14.3 Train, validation and test at the frozen thresholds"""),
+    code("""metric_cols_14 = ["base_rate", "pr_auc", "pr_auc_over_base_rate", "roc_auc", "f1", "precision", "recall"]
+test_df = pd.DataFrame(test_recs).T
+test_df["pr_auc_over_base_rate"] = test_df["pr_auc"] / test_df["base_rate"]
+blocks = {
+    "train": cmp_all[[f"train_{c}" for c in metric_cols_14]].rename(columns=lambda c: c[len("train_"):]),
+    "validation": cmp_all[[f"val_{c}" for c in metric_cols_14]].rename(columns=lambda c: c[len("val_"):]),
+    "test": test_df[metric_cols_14],
+    "test 95% CI": test_df[["pr_auc_ci_low", "pr_auc_ci_high", "roc_auc_ci_low", "roc_auc_ci_high"]],
+}
+final_table = pd.concat(blocks, axis=1).loc[list(test_models)].astype(float)
+fmt14 = {c: "{:.3f}" for c in final_table.columns}
+for split in ("train", "validation", "test"):
+    fmt14[(split, "base_rate")] = "{:.1%}"
+    fmt14[(split, "pr_auc_over_base_rate")] = "{:.2f}x"
+display(final_table.style.format(fmt14).apply(
+    lambda r: ["font-weight: bold" if r.name == selected else "" for _ in r], axis=1))
+display(pd.DataFrame({"frozen threshold": cmp_all.loc[list(test_models), "threshold"],
+                      **{k.upper(): test_df[k].astype(int) for k in ("tp", "fp", "fn", "tn")}}).round(3))"""),
+
+    code("""fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), facecolor=plots.SURFACE)
+for ax in axes:
+    ax.set_facecolor(plots.SURFACE)
+test_base = tf["y"].mean()
+for name, fr in test_frames.items():
+    p_, r_, _ = precision_recall_curve(fr["y"], fr["score"])
+    f_, t_, _ = roc_curve(fr["y"], fr["score"])
+    style = "--" if name.startswith("naive") else "-"
+    lw = 2.6 if name == selected else 1.5
+    axes[0].plot(r_, p_, style, color=colors_all[name], linewidth=lw, label=name)
+    axes[1].plot(f_, t_, style, color=colors_all[name], linewidth=lw, label=name)
+axes[0].axhline(test_base, color=plots.INK_MUTED, linewidth=1, linestyle=":", label=f"no skill ({test_base:.0%})")
+axes[1].plot([0, 1], [0, 1], color=plots.INK_MUTED, linewidth=1, linestyle=":")
+plots.style_axes(axes[0], "Precision-recall (TEST 2022–2024)", xlabel="recall", ylabel="precision")
+plots.style_axes(axes[1], "ROC (TEST 2022–2024)", xlabel="false positive rate", ylabel="true positive rate")
+axes[0].legend(frameon=False, fontsize=8.5, labelcolor=plots.INK_MUTED, loc="upper right")
+fig.tight_layout()
+plt.show()"""),
+
+    code("""r = test_recs[selected]
+cm = np.array([[r["tn"], r["fp"]], [r["fn"], r["tp"]]])
+fig, ax = plt.subplots(figsize=(5.2, 4.4), facecolor=plots.SURFACE)
+ax.imshow(cm, cmap="Blues")
+for (i, j), v in np.ndenumerate(cm):
+    ax.text(j, i, f"{v}\\n{v / cm[i].sum():.0%} of row", ha="center", va="center", fontsize=11,
+            color="white" if v > cm.max() / 2 else plots.INK)
+ax.set_xticks([0, 1], ["predicted: no podium", "predicted: podium"])
+ax.set_yticks([0, 1], ["actual: no podium", "actual: podium"])
+ax.set_title(f"{selected}, test, threshold {cmp_all.loc[selected, 'threshold']:.3f} (frozen on validation)",
+             loc="left", fontsize=11, color=plots.INK)
+fig.tight_layout()
+plt.show()"""),
+
+    code("""fig, axes = plt.subplots(1, 3, figsize=(15, 4.8), facecolor=plots.SURFACE)
+names = list(test_models)
+short = ["−grid", "−quali", "LR", "RF", "HGB", "NN"]
+xs, w = np.arange(len(names)), 0.27
+split_colors = {"train": plots.SERIES[3], "validation": plots.SERIES[0], "test": plots.SERIES[1]}
+for ax, metric, title in zip(axes, ["pr_auc", "roc_auc", "f1"], ["PR-AUC", "ROC-AUC", "F1 at the frozen threshold"]):
+    ax.set_facecolor(plots.SURFACE)
+    for k, split in enumerate(("train", "validation", "test")):
+        vals = final_table[(split, metric)].to_numpy()
+        ax.bar(xs + (k - 1) * w, vals, w, color=split_colors[split], label=split)
+        if metric == "pr_auc":
+            ax.axhline(final_table[(split, "base_rate")].iloc[0], color=split_colors[split], linewidth=1,
+                       linestyle=":")
+    if metric == "pr_auc":
+        lo = final_table[("test 95% CI", "pr_auc_ci_low")].to_numpy()
+        hi = final_table[("test 95% CI", "pr_auc_ci_high")].to_numpy()
+        tv = final_table[("test", "pr_auc")].to_numpy()
+        ax.errorbar(xs + w, tv, yerr=np.vstack([tv - lo, hi - tv]), fmt="none", ecolor=plots.INK, capsize=3)
+    ax.set_xticks(xs, short)
+    ax.set_ylim(0, 1)
+    plots.style_axes(ax, title + (" (dotted: base rates; bars: test 95% CI)" if metric == "pr_auc" else ""))
+axes[0].legend(frameon=False, fontsize=9, labelcolor=plots.INK_MUTED, loc="upper left")
+fig.tight_layout()
+plt.show()
+print(f"section 14 runtime: {time.perf_counter() - t0_14:.1f} s")"""),
+    md("""### 14.5 Results
+
+**Test set:** seasons 2022–2024, 68 races, 1,357 rows, 204 podiums, base rate 15.0% (train 13.4%, validation 15.0%).
+Intervals are race-level bootstrap 95% CIs on test.
+
+| model | test PR-AUC (× base rate) | 95% CI | test ROC-AUC | test F1 / precision / recall | validation PR-AUC |
+|---|---|---|---|---|---|
+| naive −grid | 0.647 (4.3×) | 0.591–0.709 | 0.914 | 0.649 / 0.650 / 0.647 | 0.639 |
+| naive −quali | 0.626 (4.2×) | 0.571–0.685 | 0.915 | 0.627 / 0.627 / 0.627 | 0.654 |
+| **logistic regression (final)** | **0.717 (4.8×)** | **0.659–0.779** | **0.937** | **0.676 / 0.553 / 0.868** | 0.726 |
+| random forest | 0.712 (4.7×) | 0.655–0.775 | 0.938 | 0.668 / 0.555 / 0.838 | 0.719 |
+| hist gradient boosting | 0.700 (4.7×) | 0.645–0.760 | 0.936 | 0.665 / 0.575 / 0.789 | 0.727 |
+| neural network | 0.689 (4.6×) | 0.631–0.752 | 0.937 | 0.659 / 0.591 / 0.745 | 0.753 |
+
+**The final model (logistic regression) on test vs validation.**
+- **Ranking quality holds up:** PR-AUC 0.717 on test against 0.726 on validation (−0.009, well inside the test interval
+  0.659–0.779), 4.8× the base rate on both. ROC-AUC is 0.937 (validation 0.927).
+- **The frozen threshold shifts the trade-off:** at 0.276 it flags 320 test rows (23.6%) for 204 podiums, so recall
+  rises (0.786 → 0.868: 177 of 204 podiums found, 27 missed) and precision falls (0.634 → 0.553: 143 false alarms).
+  F1 drops from 0.702 to 0.676. The validation F1 was optimistic (the threshold was tuned on it); 0.676 is the honest
+  number. The scores are not re-thresholded on test.
+
+**All models.**
+- **The four learned models all beat both naive rules on test** (PR-AUC 0.689–0.717 against 0.626–0.647), as on
+  validation. Logistic regression is +0.070 above the grid rule.
+- **Their order on test differs from validation:** logistic regression is highest on test (0.717), and the neural
+  network, highest on validation (0.753), is lowest of the four on test (0.689, −0.064). This matches the warning in 12.3
+  that its validation score was the best epoch of the best of 24 variants on the same rows, so it carried the most
+  selection optimism. The test intervals of the four learned models overlap widely. **No paired comparison is made on test**
+  because no decision is taken from it; the separation of the models was judged on validation (12.4), where they were
+  not distinguishable either.
+- **The qualifying rule falls below the grid rule on test** (0.626 vs 0.647), the reverse of validation (0.654 vs 0.639).
+  The two rules differ only where grid penalties move cars, which is a small and noisy set of rows.
+
+**Test results did not change any decision.** The final model, all configurations, thresholds, the feature list and
+the training window are those frozen before test (`FREEZE_HASH` above, identical before and after scoring), and each
+model was scored once.
+
+**Limitations.**
+- **Few races:** 68 races in 3 seasons. The PR-AUC intervals are about ±0.06 wide, so differences between the learned
+  models of 0.01–0.03 cannot be resolved.
+- **Era sensitivity:** 2022 brought new technical regulations, and 2022–2024 includes long spells of one-team dominance.
+  The test seasons are one era, so these numbers estimate performance for seasons *like* 2022–2024. They may not hold
+  after the next regulation change.
+- **Base-rate shift:** 13.4% (train, 1950–2019) → 15.0% (validation) → 15.0% (test). The 20-car grids of recent seasons
+  give a higher podium share than the larger historical fields. PR-AUC is therefore compared as a multiple of each
+  split's base rate.
+- **No test-set tuning anywhere:** thresholds, hyperparameters, class weights, features and window come from validation
+  (sections 10–13). The threshold that would be F1-optimal on test was deliberately not computed."""),
 
 ]
 
