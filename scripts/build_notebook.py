@@ -42,7 +42,7 @@ Goal: for each driver in each race, predict whether they finish on the podium
 Sections: **1** Setup, **2** Data Loading, **3** Raw Data Audit, **4** Audit follow-ups,
 **5** Findings → open decisions, **6** Cleaning, **7** Post-cleaning EDA, **8** Data-engineering questions,
 **9** Modeling table, **10** Evaluation harness and baselines, **11** Tree models and model comparison,
-**12** Shallow neural network, **13** Experiments (training window, preprocessing, ablation), **14** Final test evaluation.
+**12** Shallow neural network, **13** Experiments (training window, preprocessing, ablation), **14** Final test evaluation, **15** Inference for one record.
 Sections 3–4 only *measure* the raw data;
 cleaning happens only in section 6, following decisions recorded in the notebook.
 Reusable code lives in `src/f1podium/`."""),
@@ -3340,6 +3340,92 @@ model was scored once.
   split's base rate.
 - **No test-set tuning anywhere:** thresholds, hyperparameters, class weights, features and window come from validation
   (sections 10–13). The threshold that would be F1-optimal on test was deliberately not computed."""),
+
+    md("""## 15. Inference: one driver, one race
+
+`f1podium.inference.predict_podium(record, bundle)` scores a single pre-race record with the **final model**: the frozen
+logistic-regression pipeline fitted on train rows only, i.e. the same fitted object that was scored in section 14, with
+its decision threshold frozen on validation (0.276).
+
+**What inference assumes**
+- The record holds (some of) the **21 pre-race features** of section 9, computed exactly as `build_modeling_table` computes
+  them: grid and qualifying for this race, static context, and form / standings from **earlier races only**. The
+  function does not compute features from raw tables; it scores them.
+- **No preprocessing outside the pipeline.** Imputation (training-row medians) and scaling (training-row mean / SD) are the
+  fitted steps inside the pipeline, so a record is transformed exactly like the training, validation and test rows.
+- The output is `probability`, `decision` (probability ≥ the frozen threshold, the same rule as in evaluation), the list
+  of `missing_inputs`, the `derived` flags and the `freeze_hash` of section 14.
+
+**What happens with missing data**
+- A missing feature (absent, `None` or NaN) is allowed. It is set to NaN, filled by the pipeline's imputer with the
+  training median, and listed in `missing_inputs`, so the caller can see what the probability rests on.
+- **`has_quali` is derived, not supplied:** 1 if `quali_position` is present, else 0, exactly as in the modeling table. A
+  supplied `has_quali` that contradicts `quali_position` is rejected. Without a qualifying position the record therefore
+  looks like a race without qualifying data (mostly pre-1994 in training) and is scored as such.
+- No other flag is derived. `pit_lane_start` cannot be recovered from `grid_filled` (grid 0 is already replaced there), and a
+  missing rank does not prove round 1 (it may simply be unknown), so `is_round_1` is not inferred. Absent, they are
+  imputed like any other feature.
+- The more is missing, the closer the record moves to a "median driver", and the less the probability says about this
+  driver. The function reports this through `missing_inputs`; it does not hide it.
+
+**Why the cutoff applies**
+- The model predicts **after qualifying, before lights out**. Columns that only exist after the race (`positionOrder`,
+  `points`, `laps`, `status`, ... from `config.FORBIDDEN_CURRENT_RACE_COLUMNS`) and the target `podium` are rejected with an
+  error: `positionOrder` *defines* the target, so accepting it would turn the prediction into a lookup. Unknown columns are
+  rejected too, so a typo cannot be silently ignored."""),
+    code("""from f1podium.inference import InferenceBundle, predict_podium
+
+bundle = InferenceBundle(pipeline=test_models[selected], threshold=float(cmp_all.loc[selected, "threshold"]),
+                         model_name=selected, freeze_hash=FREEZE_HASH)
+assert bundle.pipeline is final_models["logistic regression"]       # the same fitted object as in the test report
+
+# a real validation row: the pole-sitter of the last race of 2021
+v15 = meta.loc[ev.split_rows(meta, "validation")]
+last = v15[v15["year"] == 2021]
+last = last[last["round"] == last["round"].max()]
+demo_id = X.loc[last.index].query("grid_filled == 1").index[0]
+race_name = tables["races"].set_index("raceId").loc[meta.loc[demo_id, "raceId"], "name"]
+driver = tables["drivers"].set_index("driverId").loc[meta.loc[demo_id, "driverId"]]
+print(f"demo row: {int(meta.loc[demo_id, 'year'])} {race_name}, {driver['forename']} {driver['surname']} "
+      f"(validation split; actual podium: {int(y.loc[demo_id])})")
+
+def show(out):
+    return pd.Series({k: (", ".join(v) if isinstance(v, list) else v) for k, v in out.items()}, name="value").to_frame()
+
+# (a) complete record: all 21 features of the real row
+record_a = X.loc[demo_id]
+out_a = predict_podium(record_a, bundle)
+assert out_a["probability"] == bundle.pipeline.predict_proba(X.loc[[demo_id]])[0, 1]
+assert out_a["missing_inputs"] == [] and 0 <= out_a["probability"] <= 1
+print("(a) complete record: equals pipeline.predict_proba on that row")
+display(show(out_a))"""),
+    code("""# (b) the same record with three inputs missing; has_quali is not supplied, it is derived from quali_position
+dropped = ["quali_position", "drv_rank_before", "con_podium_rate_last5"]
+record_b = X.loc[demo_id].drop(dropped + ["has_quali"]).to_dict()
+out_b = predict_podium(record_b, bundle)
+assert out_b["missing_inputs"] == [c for c in X.columns if c in dropped] and out_b["derived"] == {"has_quali": 0}
+filled = bundle.pipeline.named_steps["prep"].named_transformers_["num"].named_steps["impute"]
+medians = pd.Series(filled.statistics_, index=X.columns)
+display(pd.DataFrame({"this driver (complete record)": X.loc[demo_id, dropped],
+                      "value used when missing (train median)": medians[dropped]}))
+print("(b) partially missing record")
+display(show(out_b))
+print(f"probability: complete {out_a['probability']:.3f} -> partial {out_b['probability']:.3f}")"""),
+    code("""# (c) a record that contains a post-race column is refused
+record_c = {**X.loc[demo_id].to_dict(), "positionOrder": 1}
+try:
+    predict_podium(record_c, bundle)
+    raise AssertionError("a post-race column must be rejected")
+except ValueError as exc:
+    print("(c) rejected:", exc)"""),
+    md("""**What it shows.**
+- **(a)** For a complete record, `predict_podium` returns exactly the probability the pipeline gives that validation row
+  (asserted), with no missing inputs.
+- **(b)** With three inputs removed, the missing values are filled with training medians and listed, and `has_quali` becomes
+  0 because the qualifying position is missing. The probability changes because the model now sees a mid-field
+  qualifier with no qualifying data instead of this driver's actual values; `missing_inputs` makes that visible.
+- **(c)** A record carrying `positionOrder` (the race result) is refused before any scoring, with an error that names the
+  column and the cutoff."""),
 
 ]
 
