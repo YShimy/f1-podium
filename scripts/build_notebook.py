@@ -41,7 +41,8 @@ Goal: for each driver in each race, predict whether they finish on the podium
 
 Sections: **1** Setup, **2** Data Loading, **3** Raw Data Audit, **4** Audit follow-ups,
 **5** Findings → open decisions, **6** Cleaning, **7** Post-cleaning EDA, **8** Data-engineering questions,
-**9** Modeling table, **10** Evaluation harness and baselines, **11** Tree models and model comparison.
+**9** Modeling table, **10** Evaluation harness and baselines, **11** Tree models and model comparison,
+**12** Shallow neural network.
 Sections 3–4 only *measure* the raw data;
 cleaning happens only in section 6, following decisions recorded in the notebook.
 Reusable code lives in `src/f1podium/`."""),
@@ -160,10 +161,15 @@ import warnings
 from importlib.metadata import version as _pkg_version
 
 PINNED = __PINS__   # from requirements.txt at build time
-for _pkg in ["pandas", "numpy", "scikit-learn", "scipy", "statsmodels"]:
-    _installed = _pkg_version(_pkg)
+from importlib.metadata import PackageNotFoundError
+for _pkg in ["pandas", "numpy", "scikit-learn", "scipy", "statsmodels", "torch"]:
+    try:
+        _installed = _pkg_version(_pkg)
+    except PackageNotFoundError:
+        print(f"{_pkg:<11}: not installed")
+        continue
     print(f"{_pkg:<11}: {_installed}")
-    if _pkg in PINNED and _installed != PINNED[_pkg]:
+    if _pkg in PINNED and _installed.split("+")[0] != PINNED[_pkg]:
         warnings.warn(f"{_pkg} {_installed} differs from requirements.txt pin {PINNED[_pkg]}")
 print("src        :", SRC_DIR)
 print("raw data   :", config.RAW_DIR)
@@ -2362,6 +2368,40 @@ assert abs(cmp.loc["logistic regression", "val_pr_auc"] - val_table.loc["logisti
 - **Caution:** the hyperparameters and thresholds were picked on these validation rows, so the validation columns are
   mildly optimistic. The differences between the three learned models are not meaningful at this size (11.5)."""),
 
+    md("""### 11.4b Confusion counts: is the identical logistic-regression / random-forest triple a coincidence?
+
+Logistic regression and random forest have the same validation F1, precision and recall (0.702 / 0.634 / 0.786), and
+gradient boosting shares the recall. Here are the counts behind those ratios at each model's frozen threshold, and
+how much the predicted-positive sets actually overlap."""),
+    code("""conf = cmp[["threshold", "val_tp", "val_fp", "val_fn", "val_tn", "val_precision", "val_recall", "val_f1"]].copy()
+conf.columns = ["threshold", "TP", "FP", "FN", "TN", "precision", "recall", "F1"]
+conf.insert(1, "predicted podium (TP+FP)", conf["TP"] + conf["FP"])
+conf.insert(2, "actual podiums (TP+FN)", conf["TP"] + conf["FN"])
+display(conf.style.format({"threshold": "{:.3f}", "precision": "{:.4f}", "recall": "{:.4f}", "F1": "{:.4f}"}))
+
+pred_pos = {m: val_scores[m] >= cmp.loc[m, "threshold"] for m in ("logistic regression", "random forest",
+                                                                   "hist gradient boosting")}
+yv_b = y.loc[ev.split_rows(meta, "validation")].to_numpy().astype(bool)
+overlap_rows = []
+for a, b in [("logistic regression", "random forest"), ("logistic regression", "hist gradient boosting"),
+             ("random forest", "hist gradient boosting")]:
+    pa, pb = pred_pos[a], pred_pos[b]
+    overlap_rows.append({"model A": a, "model B": b, "both predict podium": int((pa & pb).sum()),
+                         "only A": int((pa & ~pb).sum()), "only B": int((~pa & pb).sum()),
+                         "same TP set": bool(((pa & yv_b) == (pb & yv_b)).all())})
+display(pd.DataFrame(overlap_rows))"""),
+    md("""**What it shows.**
+- **The counts really are identical.** Logistic regression and random forest both give TP 92, FP 53, FN 25 (145
+  predicted podiums, 117 actual), so precision 92/145 = 0.6345, recall 92/117 = 0.7863 and F1 0.7023 are exactly equal.
+  It is not a rounding or copy error.
+- **But the predictions are not the same.** They agree on 138 of the 145 predicted podiums; 7 rows are flagged by
+  logistic regression only and 7 by random forest only (3 podiums and 4 non-podiums in each group), so the sets of
+  correctly flagged podiums differ. The same
+  totals come from different drivers: the swapped rows contain equal numbers of hits and misses. That is a coincidence of
+  counts at one threshold on 780 rows, not evidence that the two models are the same model.
+- **Gradient boosting** has the same TP and FN (92 and 25) but 142 predictions (FP 50), so its precision is 0.648 and F1
+  0.710."""),
+
     md("""### 11.5 Paired race-level bootstrap on validation
 
 **Question:** are the PR-AUC differences between models larger than the noise? Whole races are resampled with
@@ -2425,6 +2465,249 @@ plt.show()"""),
 > **Test stays locked.** `final_test_report` has not been called, and `results/final_test.csv` does not exist. The
 > choices above (model families, hyperparameters, class weights, thresholds) are all frozen from validation, so a later
 > one-off test evaluation is an honest estimate."""),
+
+
+    md("""## 12. Shallow neural network (validation only)
+
+A small feed-forward network (PyTorch, CPU) on **the same modeling table, features and split** as the other models.
+**The test split is not used** (`final_test_report` is not called).
+
+### How a shallow feed-forward network works
+- **Input:** the 21 features after the same preprocessing as logistic regression: median imputation and
+  `StandardScaler`, both fitted on the training rows only.
+- **Hidden layers (1 or 2):** each unit computes a weighted sum of its inputs plus a bias and applies **ReLU**,
+  `max(0, x)`. Stacking units lets the model build non-linear combinations of features (for example "good grid *and*
+  strong recent form") that a logistic regression cannot.
+- **Output:** one unit with a **sigmoid**, giving a probability of a podium. The loss is **binary cross-entropy**, minimised
+  with **Adam** (a gradient-descent method) on mini-batches of 256 rows. In the code the sigmoid sits inside
+  `BCEWithLogitsLoss`, which is the same function but numerically safer.
+- **Regularisation knobs:** **dropout** (randomly switching off a share of hidden units while training) and
+  **weight decay** (an L2 penalty on the weights).
+- **Early stopping:** after each epoch the validation PR-AUC is computed; training stops after **10 epochs without
+  improvement** (patience 10, at most **100 epochs**) and the weights of the best epoch are restored.
+- **Reproducibility:** seeds for `random`, `numpy` and `torch` (42), CPU only, one thread,
+  `torch.use_deterministic_algorithms(True)`. Two runs give identical predictions (unit-tested).
+
+### Is it suited to this data?
+- **For:** it can represent smooth non-linear interactions, outputs a smooth probability, and with 22,624 rows × 21
+  features trains in seconds.
+- **Against:** this is a small tabular problem, where tree ensembles are usually at least as good and need less tuning.
+  A network needs scaled inputs and an imputation strategy (no native NaN handling), is sensitive to the random seed
+  and initialisation, and is the least interpretable model here: there are no coefficients to read, only permutation
+  importance or SHAP afterwards.
+- **Limitations in this notebook:** one seed per variant (no seed averaging), a small grid, no calibration check, and
+  the training years (1950–2019) differ in era from validation (2020–2021).
+
+### Why early stopping on validation is allowed, and why it is slightly optimistic
+- **Allowed:** the validation split exists for development choices (model, hyperparameters, threshold). The number of
+  epochs is one more choice, so it is made on validation. The test split is never seen.
+- **Slightly optimistic:** the validation PR-AUC reported for the network is the *best value over epochs* on the same
+  rows that picked the epoch (and the grid winner is the best of 24 variants). The unbiased number is test, later, once.
+  The other models' validation scores have the same kind of optimism from their grids, but without a per-epoch maximum."""),
+
+    md("""### 12.1 Grid on validation
+
+Grid (`config.NN_GRID`): hidden sizes ∈ {(32), (64), (64, 32)} (1–2 layers), dropout ∈ {0, 0.3}, weight decay ∈ {0,
+0.001}, learning rate ∈ {0.001, 0.003}: 24 variants. Fixed (`config.NN_FIXED`): batch size 256, max 100 epochs,
+patience 10, seed 42. The chosen variant has the highest validation PR-AUC (ties: the earlier one). `best_epoch` is the
+epoch whose weights are kept; `epochs_run` includes the 10 patience epochs."""),
+    code("""import torch
+from f1podium.nn import ShallowNNClassifier
+
+print("torch", torch.__version__, "| cuda available:", torch.cuda.is_available(), "| device: cpu")
+nn_table, nn_best = ev.tune_on_validation("neural network", ShallowNNClassifier, config.NN_GRID, meta, X, y,
+                                          fixed=config.NN_FIXED)
+print(f"validation base rate (PR-AUC chance level): {val_base:.3f}")
+print("chosen:", nn_best)
+
+nn_view = nn_table[["param_hidden_sizes", "param_dropout", "param_weight_decay", "param_lr", "val_pr_auc",
+                    "val_roc_auc", "val_f1", "val_precision", "val_recall", "threshold", "train_pr_auc",
+                    "gap_pr_auc", "best_epoch", "epochs_run"]].copy()
+nn_view.insert(0, "chosen", np.where(nn_table["chosen"], "◄ chosen", ""))
+nn_view["param_hidden_sizes"] = nn_view["param_hidden_sizes"].map(lambda t: "x".join(map(str, t)))
+nn_view.columns = [c.replace("param_", "") for c in nn_view.columns]
+fmt = {c: "{:.3f}" for c in ["val_pr_auc", "val_roc_auc", "val_f1", "val_precision", "val_recall", "threshold",
+                             "train_pr_auc", "gap_pr_auc"]}
+display(nn_view.style.format(fmt).apply(lambda r: ["font-weight: bold" if r["chosen"] else "" for _ in r], axis=1))"""),
+    md("""**What it shows.**
+- **The 24 variants are close:** validation PR-AUC 0.737–0.753, ROC-AUC 0.926–0.932, F1 0.700–0.721. The winner
+  (0.753) is not meaningfully ahead of the next three (0.752, 0.751, 0.750), so the choice among them is close to a
+  coin flip.
+- **Chosen: one hidden layer of 32 units, dropout 0, weight decay 0, learning rate 0.001**, best epoch 47 of 57 run,
+  frozen threshold 0.344.
+- **Regularisation did not help here.** In 12 matched pairs, dropout 0.3 was better in 4 (by at most 0.008) and worse in
+  8 (by up to 0.012). Weight decay 0.001 was mixed. A second hidden layer made no clear difference (best 0.751 vs
+  0.753 for one layer).
+- **The learning rate sets how early it stops:** the median best epoch is about 15 at 0.003 and about 32 at 0.001, with
+  similar PR-AUC.
+- **Train − validation gaps are −0.14 to −0.17 for every variant**, the same era effect as for the other models."""),
+
+    md("""### 12.2 Chosen configuration: training curves
+
+Train loss (with dropout active), validation loss and validation PR-AUC per epoch. The dashed line marks the epoch whose
+weights are kept."""),
+    code("""nn_final = ShallowNNClassifier(**nn_best, **config.NN_FIXED)
+nn_row, nn_final, nn_val_scores = ev.evaluate_train_val("neural network", nn_final, meta, X, y)
+h = nn_final.history_
+assert nn_row["best_epoch"] == int(h["val_pr_auc"].idxmax()) + 1
+print(f"epochs run: {len(h)} | best epoch: {nn_final.best_epoch_} | "
+      f"val PR-AUC at best epoch: {h['val_pr_auc'].max():.4f} | threshold (frozen on validation): {nn_row['threshold']:.3f}")
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4.6), facecolor=plots.SURFACE)
+for ax in axes:
+    ax.set_facecolor(plots.SURFACE)
+    ax.axvline(nn_final.best_epoch_, color=plots.INK_MUTED, linewidth=1, linestyle="--")
+axes[0].plot(h["epoch"], h["train_loss"], color=plots.SERIES[0], linewidth=1.8, label="train loss")
+axes[0].plot(h["epoch"], h["val_loss"], color=plots.SERIES[1], linewidth=1.8, label="validation loss")
+axes[1].plot(h["epoch"], h["val_pr_auc"], color=plots.SERIES[2], linewidth=1.8, label="validation PR-AUC")
+axes[1].axhline(val_base, color=plots.INK_MUTED, linewidth=1, linestyle=":", label=f"no skill ({val_base:.0%})")
+plots.style_axes(axes[0], "Loss per epoch (binary cross-entropy)", xlabel="epoch", ylabel="loss")
+plots.style_axes(axes[1], "Validation PR-AUC per epoch", xlabel="epoch", ylabel="PR-AUC")
+for ax in axes:
+    ax.legend(frameon=False, fontsize=9, labelcolor=plots.INK_MUTED)
+fig.tight_layout()
+plt.show()"""),
+    md("""**What it shows.**
+- **Both losses fall steeply for about five epochs and then flatten.** Validation PR-AUC reaches about 0.72 by
+  epoch 9 and then creeps up to 0.74–0.753 with ±0.005 wobble.
+- **The "best epoch" is not sharply better than its neighbours:** 0.753 at epoch 47 against 0.748 at the last epoch (57).
+  Differences of ±0.005 between epochs are noise, so the early-stopping rule mostly picks a point on a plateau.
+- **Validation loss stays below train loss** (about 0.221 vs 0.243) even with no dropout. The validation seasons
+  (2020–2021, 20-car grids, full qualifying data) are easier than the average training season, which matches the
+  negative train − validation gaps of every model. Validation loss does not trend upwards (it ends at its
+  lowest value, 0.2208 at epoch 56, with ±0.002 wobble), so this network is not overfitting within 57 epochs; it
+  stopped because PR-AUC stopped improving."""),
+
+    md("""### 12.3 All models: train and validation at the frozen validation threshold
+
+Same layout as 11.4 with the neural network added, and with the confusion counts (TP, FP, FN) at the frozen threshold
+for both splits. The threshold is the F1-optimal one on validation, applied unchanged to train."""),
+    code("""cmp_all = pd.concat([cmp, pd.DataFrame([nn_row]).set_index("model")])
+all_val_scores = {**val_scores, "neural network": nn_val_scores}
+metric_cols = ["base_rate", "pr_auc", "pr_auc_over_base_rate", "roc_auc", "precision", "recall", "f1"]
+all_tv = pd.concat({
+    "train": cmp_all[[f"train_{c}" for c in metric_cols]].rename(columns=lambda c: c[len("train_"):]),
+    "validation": cmp_all[[f"val_{c}" for c in metric_cols]].rename(columns=lambda c: c[len("val_"):]),
+    "gap (train − validation)": cmp_all[["gap_pr_auc", "gap_roc_auc", "gap_f1"]].rename(columns=lambda c: c[len("gap_"):]),
+}, axis=1)
+display(pd.DataFrame({"frozen validation threshold": cmp_all["threshold"]}).T.round(3))
+fmt = {c: "{:.3f}" for c in all_tv.columns}
+for split in ("train", "validation"):
+    fmt[(split, "base_rate")] = "{:.1%}"
+    fmt[(split, "pr_auc_over_base_rate")] = "{:.2f}x"
+display(all_tv.style.format(fmt))
+
+counts = pd.concat({
+    "train": cmp_all[["train_tp", "train_fp", "train_fn", "train_tn"]].rename(columns=lambda c: c[len("train_"):]),
+    "validation": cmp_all[["val_tp", "val_fp", "val_fn", "val_tn"]].rename(columns=lambda c: c[len("val_"):]),
+}, axis=1)
+display(counts)"""),
+    md("""**What it shows.**
+- **The network has the highest validation PR-AUC and ROC-AUC of the six models:** PR-AUC 0.753 (5.0× the 0.150 base
+  rate), ROC-AUC 0.932. Next come gradient boosting 0.727, logistic regression 0.726 and random forest 0.719.
+- **Its F1 at the frozen threshold (0.710) ties gradient boosting,** and the four learned models are within 0.008 of
+  each other (0.702–0.710). It is more conservative: precision 0.680 and recall 0.744 (TP 87, FP 41, FN 30, 128 predicted
+  podiums), against 0.634 / 0.786 for logistic regression and random forest (TP 92, FP 53, FN 25).
+- **Train PR-AUC is 0.595, so the gap is −0.158,** close to logistic regression's −0.152: again mostly the era
+  difference, not a sign that the network generalises better or worse than the others.
+- **Optimism:** 0.753 is the best epoch of the best of 24 variants, both chosen on these rows. At the final epoch the same
+  network scores 0.748. The other models' grid winners carry the same kind of selection optimism but not the
+  per-epoch maximum, so the network's lead over them is probably slightly overstated."""),
+
+    md("""### 12.4 Paired race-level bootstrap on validation (all models)
+
+Same method as 11.5 (whole races resampled, B = 1000, seed 42, the same races for both models of a pair), now with the
+neural network. Differences are PR-AUC of *model* minus PR-AUC of *versus*."""),
+    code("""yv_arr = y.loc[val_idx].to_numpy()
+race_v = meta.loc[val_idx, "raceId"].to_numpy()
+names_all = list(all_val_scores)
+pairs_all = [(m, ref_grid) for m in names_all if m != ref_grid] + \
+            [(m, ref_lr) for m in names_all if m not in (ref_grid, ref_lr)]
+boot_all = ev.paired_race_bootstrap(yv_arr, all_val_scores, race_v, pairs_all, B=config.BOOTSTRAP_B,
+                                    seed=config.RANDOM_SEED)
+boot_all["interval excludes 0"] = (boot_all["ci_low"] > 0) | (boot_all["ci_high"] < 0)
+display(boot_all.set_index(["versus", "model"])[["pr_auc_diff", "ci_low", "ci_high", "share_a_better",
+                                                  "interval excludes 0"]]
+        .style.format({"pr_auc_diff": "{:+.3f}", "ci_low": "{:+.3f}", "ci_high": "{:+.3f}",
+                       "share_a_better": "{:.1%}"}))
+print("resamples:", int(boot_all["B"].iloc[0]), "| skipped (single class):", int(boot_all["skipped"].iloc[0]))"""),
+    md("""**What it shows.**
+- **The network is clearly better than the grid rule:** +0.114 PR-AUC (95% interval +0.074 to +0.152; better in
+  100% of resamples).
+- **It is not distinguishable from logistic regression:** +0.027 (−0.006 to +0.056); it is ahead in 94% of resamples, but
+  the interval includes 0. **Nor from random forest** (+0.034, −0.009 to +0.073) **or gradient boosting** (+0.026, −0.014
+  to +0.061), as the rule table in 12.6 shows.
+- **The other rows are the same as in 11.5** (same races, same seed).
+- **Limits:** 39 validation races, and the intervals do not include the uncertainty from choosing epochs and
+  hyperparameters on those races. "Not distinguishable at this n" is not "no difference"."""),
+
+    md("""### 12.5 Precision-recall and ROC curves, all models (validation)"""),
+    code("""colors_all = {**colors, "neural network": "#8a4fc7"}
+fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), facecolor=plots.SURFACE)
+for ax in axes:
+    ax.set_facecolor(plots.SURFACE)
+for model_name, s in all_val_scores.items():
+    p_, r_, _ = precision_recall_curve(yv_arr, s)
+    f_, t_, _ = roc_curve(yv_arr, s)
+    style = "--" if model_name == "naive: -grid" else "-"
+    axes[0].plot(r_, p_, style, color=colors_all[model_name], linewidth=1.8, label=model_name)
+    axes[1].plot(f_, t_, style, color=colors_all[model_name], linewidth=1.8, label=model_name)
+axes[0].axhline(val_base, color=plots.INK_MUTED, linewidth=1, linestyle=":", label=f"no skill ({val_base:.0%})")
+axes[1].plot([0, 1], [0, 1], color=plots.INK_MUTED, linewidth=1, linestyle=":")
+plots.style_axes(axes[0], "Precision-recall (validation)", xlabel="recall", ylabel="precision")
+plots.style_axes(axes[1], "ROC (validation)", xlabel="false positive rate", ylabel="true positive rate")
+axes[0].legend(frameon=False, fontsize=8.5, labelcolor=plots.INK_MUTED, loc="upper right")
+fig.tight_layout()
+plt.show()"""),
+    md("""**What it shows.**
+- **The network's precision-recall curve is higher only at low recall (0.1–0.3):** its best precision there is
+  1.00 / 0.95 / 0.95, against 0.86–0.94 for the other learned models. Only about 35 podiums (30% of 117) sit in that part
+  of the curve, so a handful of rows decide it. This is where its PR-AUC advantage comes from.
+- **At recall 0.4–0.5 it is slightly lower** than the others (0.79 / 0.76 against 0.82–0.86 / 0.79–0.82). From recall
+  0.6 upwards the four learned models are within 0.03 of each other.
+- **All four learned models stay above the grid rule up to recall 0.9;** at recall 0.95 the gap is gone (0.27 for
+  the grid rule against 0.28–0.31).
+- **The ROC curves of the learned models are practically on top of each other.**"""),
+
+    md("""### 12.6 Final-model selection rule
+
+> **Rule (fixed before looking at test):**
+> 1. **Choose by validation PR-AUC:** the model with the highest validation PR-AUC is the reference.
+> 2. **If the paired-bootstrap interval of the difference to another model includes 0, prefer the simpler, more
+>    interpretable model** among the reference and all models that are not distinguishable from it.
+>
+> **Simplicity order** (simplest first; an *Assumption*, stated here so it is not chosen after the fact):
+> −grid < −quali < logistic regression < random forest < gradient boosting < neural network. Logistic regression has
+> readable coefficients; the tree ensembles are black boxes with importances; the network is the hardest to interpret.
+>
+> The rule uses validation data only. The chosen model is then fitted once on train, with its frozen threshold, and
+> evaluated on test once through `final_test_report`. **That has not happened in this notebook.**"""),
+    code("""simplicity = ["naive: -grid", "naive: -quali (fallback -grid)", "logistic regression", "random forest",
+              "hist gradient boosting", "neural network"]
+best_name = cmp_all["val_pr_auc"].idxmax()
+rule_pairs = [(best_name, m) for m in simplicity if m != best_name]
+rule = ev.paired_race_bootstrap(yv_arr, all_val_scores, race_v, rule_pairs, B=config.BOOTSTRAP_B,
+                                seed=config.RANDOM_SEED)
+rule["interval includes 0"] = ~((rule["ci_low"] > 0) | (rule["ci_high"] < 0))
+rule["simplicity rank"] = rule["versus"].map(simplicity.index)
+candidates = [best_name] + rule.loc[rule["interval includes 0"], "versus"].tolist()
+selected = min(candidates, key=simplicity.index)
+print(f"highest validation PR-AUC: {best_name} ({cmp_all.loc[best_name, 'val_pr_auc']:.3f})")
+display(rule.set_index("versus")[["pr_auc_diff", "ci_low", "ci_high", "interval includes 0", "simplicity rank"]]
+        .rename(columns={"pr_auc_diff": f"PR-AUC diff ({best_name} − versus)"})
+        .style.format({f"PR-AUC diff ({best_name} − versus)": "{:+.3f}", "ci_low": "{:+.3f}", "ci_high": "{:+.3f}"}))
+print("candidates (reference + models not distinguishable from it):", candidates)
+print("selected by the rule:", selected)"""),
+    md("""**What it shows.**
+- **Highest validation PR-AUC: the neural network (0.753).** Its paired-bootstrap intervals against logistic
+  regression (−0.006 to +0.056), random forest (−0.009 to +0.073) and gradient boosting (−0.014 to +0.061) all include 0.
+  Only the two naive rules are clearly worse (intervals above 0).
+- **Candidates:** neural network, logistic regression, random forest, gradient boosting. The simplest of them is
+  **logistic regression**, so **the rule selects logistic regression** (`class_weight=None`, validation threshold 0.276).
+- **How to read it:** this is the outcome of the rule on validation evidence, not a claim that logistic regression is
+  more accurate. The data cannot separate the four learned models on 39 races; when evidence is a tie, the rule prefers
+  the model that can be explained and audited. Nothing has been evaluated on test. If you accept the rule as written,
+  that choice and its frozen threshold are what the one-off test run would use."""),
 
 ]
 
