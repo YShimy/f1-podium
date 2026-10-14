@@ -45,7 +45,7 @@ class ShallowNNClassifier(ClassifierMixin, BaseEstimator):
     uses_validation_for_early_stopping = True      # evaluation.fit_on_train then passes the VALIDATION rows
 
     def __init__(self, hidden_sizes=(32,), dropout=0.0, weight_decay=0.0, lr=1e-3, batch_size=256,
-                 max_epochs=100, patience=10, seed=config.RANDOM_SEED):
+                 max_epochs=100, patience=10, seed=config.RANDOM_SEED, prep_order="impute_scale"):
         self.hidden_sizes = hidden_sizes
         self.dropout = dropout
         self.weight_decay = weight_decay
@@ -54,6 +54,7 @@ class ShallowNNClassifier(ClassifierMixin, BaseEstimator):
         self.max_epochs = max_epochs
         self.patience = patience
         self.seed = seed
+        self.prep_order = prep_order        # experiment only: "scale_impute" swaps the preprocessing order
 
     def _tensor(self, X: pd.DataFrame) -> torch.Tensor:
         return torch.from_numpy(self.prep_.transform(X).to_numpy(dtype=np.float32))
@@ -75,7 +76,7 @@ class ShallowNNClassifier(ClassifierMixin, BaseEstimator):
         return self
 
     def _fit(self, X, y, eval_set):
-        self.prep_ = build_preprocessor(scale=True)
+        self.prep_ = build_preprocessor(scale=True, order=self.prep_order)
         Xt = torch.from_numpy(self.prep_.fit_transform(X).to_numpy(dtype=np.float32))
         yt = torch.from_numpy(y)
         if eval_set is not None:

@@ -22,21 +22,35 @@ LR_PARAMS = {"solver": "lbfgs", "penalty": "l2", "C": 1.0, "max_iter": 1000, "cl
              "random_state": config.RANDOM_SEED}
 
 
-def build_preprocessor(scale: bool, features: list[str] = FEATURES) -> ColumnTransformer:
-    """Median imputation over all features, then (for scale-sensitive models) standardisation."""
+PREP_ORDERS = ("impute_scale", "scale_impute")
+
+
+def build_preprocessor(scale: bool, features: list[str] = FEATURES, order: str = "impute_scale") -> ColumnTransformer:
+    """Median imputation over all features, then (for scale-sensitive models) standardisation.
+
+    order="scale_impute" (experiment only) standardises first (StandardScaler ignores NaN when fitting
+    and keeps it when transforming), then fills the gaps with the median of the scaled column.
+    """
+    if order not in PREP_ORDERS:
+        raise ValueError(f"order must be one of {PREP_ORDERS}, got {order!r}")
     steps = [("impute", SimpleImputer(strategy="median"))]
     if scale:
         steps.append(("scale", StandardScaler()))
+        if order == "scale_impute":
+            steps.reverse()
     prep = ColumnTransformer([("num", Pipeline(steps), list(features))], remainder="drop",
                              verbose_feature_names_out=False)
     return prep.set_output(transform="pandas")
 
 
-def logistic_baseline(**params) -> Pipeline:
+def logistic_baseline(*, features: list[str] = FEATURES, prep_order: str = "impute_scale", **params) -> Pipeline:
     """Median imputation + standardisation + L2 logistic regression with fixed default parameters.
 
-    `params` override LR_PARAMS (used only for the class_weight comparison)."""
-    return Pipeline([("prep", build_preprocessor(scale=True)), ("clf", LogisticRegression(**{**LR_PARAMS, **params}))])
+    `params` override LR_PARAMS (used only for the class_weight comparison). `features` (a subset of the
+    columns, for the ablation) and `prep_order` (impute-then-scale vs scale-then-impute) are only
+    changed by the experiments; the defaults are the frozen model."""
+    return Pipeline([("prep", build_preprocessor(scale=True, features=features, order=prep_order)),
+                     ("clf", LogisticRegression(**{**LR_PARAMS, **params}))])
 
 
 class _RuleBaseline(ClassifierMixin, BaseEstimator):

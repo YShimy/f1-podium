@@ -110,6 +110,22 @@ NN_GRID = {"hidden_sizes": ((32,), (64,), (64, 32)), "dropout": (0.0, 0.3),
            "weight_decay": (0.0, 1e-3), "lr": (1e-3, 3e-3)}
 NN_FIXED = {"batch_size": 256, "max_epochs": 100, "patience": 10, "seed": RANDOM_SEED}
 
+# Experiments (section 13; logistic regression with frozen parameters, VALIDATION only).
+TRAIN_START_CANDIDATES = (1950, 1996, 2003, 2014)   # training-window experiment; the end stays TRAIN_END_YEAR
+# Feature groups for the ablation: every feature in exactly one group (checked by a test). Missing-value
+# flags sit with the columns they flag (has_quali -> qualifying, is_round_1 -> standings, which are NaN at round 1).
+FEATURE_GROUPS = {
+    "grid": ("grid_filled", "pit_lane_start"),
+    "qualifying": ("quali_position", "has_quali"),
+    "season standings": ("drv_points_before", "drv_rank_before", "con_points_before", "con_rank_before", "is_round_1"),
+    "driver form": ("drv_podium_rate_last3", "drv_podium_rate_last5", "drv_mean_pos_last3", "drv_mean_pos_last5",
+                    "drv_races_before"),
+    "constructor form": ("con_podium_rate_last3", "con_podium_rate_last5", "con_mean_pos_last3", "con_mean_pos_last5",
+                         "con_races_before"),
+    "reliability": ("con_mech_rate_last10",),
+    "home": ("is_home",),
+}
+
 # Data-engineering questions (descriptive analyses of race outcomes; not model features).
 DE_WINDOW = (2003, 2024)          # primary window: seasons with near-complete qualifying data
 DE_ERA_SPLIT_YEAR = 2014          # eras: <= 2013 vs >= 2014

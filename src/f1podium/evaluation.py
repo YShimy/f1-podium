@@ -21,12 +21,17 @@ from f1podium.features import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL
 FINAL_TEST_FILE = "final_test.csv"
 
 
-def split_rows(meta: pd.DataFrame, split: str) -> pd.Index:
-    """Index of the train rows (inside the training window) or validation rows. Test is refused here."""
+def split_rows(meta: pd.DataFrame, split: str, train_start: int | None = None) -> pd.Index:
+    """Index of the train rows (inside the training window) or validation rows. Test is refused here.
+
+    `train_start` overrides config.TRAIN_START_YEAR for the train split (training-window experiment);
+    it never changes the validation rows.
+    """
     if split == SPLIT_TEST:
         raise PermissionError("the test split is only scored by final_test_report")
     if split == SPLIT_TRAIN:
-        mask = (meta["split"] == SPLIT_TRAIN) & meta["year"].between(config.TRAIN_START_YEAR, config.TRAIN_END_YEAR)
+        start = config.TRAIN_START_YEAR if train_start is None else train_start
+        mask = (meta["split"] == SPLIT_TRAIN) & meta["year"].between(start, config.TRAIN_END_YEAR)
     elif split == SPLIT_VAL:
         mask = meta["split"] == SPLIT_VAL
     else:
@@ -34,13 +39,13 @@ def split_rows(meta: pd.DataFrame, split: str) -> pd.Index:
     return meta.index[mask]
 
 
-def fit_on_train(model, meta: pd.DataFrame, X: pd.DataFrame, y: pd.Series):
-    """Fit `model` (in place) on training rows only and return it.
+def fit_on_train(model, meta: pd.DataFrame, X: pd.DataFrame, y: pd.Series, train_start: int | None = None):
+    """Fit `model` (in place) on training rows only (from `train_start`, default config) and return it.
 
     A model that sets `uses_validation_for_early_stopping = True` (the neural network) also receives
     the VALIDATION rows as `eval_set`, to monitor for early stopping. The test split is never passed.
     """
-    rows = split_rows(meta, SPLIT_TRAIN)
+    rows = split_rows(meta, SPLIT_TRAIN, train_start)
     if getattr(model, "uses_validation_for_early_stopping", False):
         vrows = split_rows(meta, SPLIT_VAL)
         return model.fit(X.loc[rows], y.loc[rows], eval_set=(X.loc[vrows], y.loc[vrows]))
@@ -94,18 +99,25 @@ def evaluate_on_validation(name: str, model, meta: pd.DataFrame, X: pd.DataFrame
     return row, model
 
 
-def evaluate_train_val(name: str, model, meta: pd.DataFrame, X: pd.DataFrame, y: pd.Series) -> tuple[dict, object, np.ndarray]:
+def evaluate_train_val(name: str, model, meta: pd.DataFrame, X: pd.DataFrame, y: pd.Series,
+                       train_start: int | None = None) -> tuple[dict, object, np.ndarray]:
     """Fit on train; threshold = F1-optimal on VALIDATION; report train and validation at that frozen threshold.
 
     Returns (row, fitted model, validation scores). Row keys are prefixed train_ / val_, plus the
     overfitting gaps (train minus validation) and the frozen threshold. Only train and validation
-    rows are ever read (split_rows refuses test).
+    rows are ever read (split_rows refuses test). `train_start` narrows the training window.
     """
-    fit_on_train(model, meta, X, y)
+    fit_on_train(model, meta, X, y, train_start)
+    return score_train_val(name, model, meta, X, y, train_start)
+
+
+def score_train_val(name: str, model, meta: pd.DataFrame, X: pd.DataFrame, y: pd.Series,
+                    train_start: int | None = None) -> tuple[dict, object, np.ndarray]:
+    """The scoring half of evaluate_train_val, for a model that is ALREADY fitted (see its docstring)."""
     out = {"model": name}
     scored = {}
     for tag, split in (("val", SPLIT_VAL), ("train", SPLIT_TRAIN)):
-        rows = split_rows(meta, split)
+        rows = split_rows(meta, split, train_start)
         scored[tag] = (y.loc[rows].to_numpy(), scores(model, X.loc[rows]))
     yv, sv = scored["val"]
     threshold, _ = f1_optimal_threshold(yv, sv)

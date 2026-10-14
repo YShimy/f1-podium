@@ -107,7 +107,7 @@ def test_harness_never_reads_test_rows_for_the_network(monkeypatch):
     X.loc[meta["split"] == "test"] = np.nan
     requested = []
     real = E.split_rows
-    monkeypatch.setattr(E, "split_rows", lambda m, s: (requested.append(s), real(m, s))[1])
+    monkeypatch.setattr(E, "split_rows", lambda m, s, *a, **k: (requested.append(s), real(m, s, *a, **k))[1])
     row, model, _ = E.evaluate_train_val("nn", ShallowNNClassifier(**FAST), meta, X, y)
     assert set(requested) <= {"train", "validation"}
     assert row["epochs_run"] == len(model.history_) and row["best_epoch"] == model.best_epoch_

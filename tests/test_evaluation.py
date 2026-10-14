@@ -190,7 +190,7 @@ def test_grid_search_never_touches_test_rows(monkeypatch):
     X.loc[meta["split"] == "test"] = np.nan
     requested = []
     real = E.split_rows
-    monkeypatch.setattr(E, "split_rows", lambda m, split: (requested.append(split), real(m, split))[1])
+    monkeypatch.setattr(E, "split_rows", lambda m, split, *a, **k: (requested.append(split), real(m, split, *a, **k))[1])
     table, best = E.tune_on_validation("rf", M.random_forest, {"n_estimators": (10, 20), "max_depth": (2, 3)},
                                        meta, X, y)
     assert len(table) == 4 and set(requested) == {"train", "validation"}
