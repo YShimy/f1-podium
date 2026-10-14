@@ -42,7 +42,7 @@ Goal: for each driver in each race, predict whether they finish on the podium
 Sections: **1** Setup, **2** Data Loading, **3** Raw Data Audit, **4** Audit follow-ups,
 **5** Findings → open decisions, **6** Cleaning, **7** Post-cleaning EDA, **8** Data-engineering questions,
 **9** Modeling table, **10** Evaluation harness and baselines, **11** Tree models and model comparison,
-**12** Shallow neural network, **13** Experiments (training window, preprocessing, ablation), **14** Final test evaluation, **15** Inference for one record.
+**12** Shallow neural network, **13** Experiments (training window, preprocessing, ablation), **14** Final test evaluation, **15** Inference for one record, **16** Explainability.
 Sections 3–4 only *measure* the raw data;
 cleaning happens only in section 6, following decisions recorded in the notebook.
 Reusable code lives in `src/f1podium/`."""),
@@ -162,7 +162,7 @@ from importlib.metadata import version as _pkg_version
 
 PINNED = __PINS__   # from requirements.txt at build time
 from importlib.metadata import PackageNotFoundError
-for _pkg in ["pandas", "numpy", "scikit-learn", "scipy", "statsmodels", "torch"]:
+for _pkg in ["pandas", "numpy", "scikit-learn", "scipy", "statsmodels", "torch", "shap", "lime"]:  # lime: no __version__
     try:
         _installed = _pkg_version(_pkg)
     except PackageNotFoundError:
@@ -3426,6 +3426,383 @@ except ValueError as exc:
   qualifier with no qualifying data instead of this driver's actual values; `missing_inputs` makes that visible.
 - **(c)** A record carrying `positionOrder` (the race result) is refused before any scoring, with an error that names the
   column and the cutoff."""),
+
+    md("""## 16. Explainability of the final model (validation rows only)
+
+**Scope.** The frozen logistic-regression pipeline (fitted on train rows; the object scored in section 14 and used for
+inference in section 15) is explained **on the 780 validation rows (39 races)**. Test is already scored; it is not read
+here, and no decision depends on this section. Nothing is refitted. HistGradientBoosting (also as fitted in section 11)
+is explained the same way, to check whether the two models rely on the same inputs. Code: `src/f1podium/xai.py`.
+
+> **Explanations show predictive association and model reliance, not causal effects.** A feature with a large
+> importance is one the *model* leans on to rank rows; it does not mean that changing that input in the real world
+> would change who finishes on the podium.
+
+**Correlated features split the credit.** Several inputs carry overlapping information: grid and qualifying position,
+season points and season rank, form over the last 3 and the last 5 races. Permutation importance then understates each
+one (shuffling one leaves its partner intact), and SHAP divides the effect between them according to the model's
+weights. Neither method measures the importance of the *information*; the group results (16.2) are the safer reading."""),
+    code("""import time
+from f1podium import xai
+shap = xai.shap
+
+t0_16 = time.perf_counter()
+test_log_before_16 = _file_state(final_test_path)
+vrows_16 = ev.split_rows(meta, "validation")
+trows_16 = ev.split_rows(meta, "train")
+Xv, yv, Xtr = X.loc[vrows_16], y.loc[vrows_16], X.loc[trows_16]
+lr_pipe, hgb_pipe = final_models["logistic regression"], final_models["hist gradient boosting"]
+print(f"explaining on validation: {len(Xv)} rows, {meta.loc[vrows_16, 'raceId'].nunique()} races; "
+      f"SHAP background: {len(Xtr)} train rows")
+
+def importance_plot(ax, table, title, color, top=None):
+    t = table.head(top) if top else table
+    t = t.iloc[::-1]
+    ax.barh(range(len(t)), t["importance_mean"], xerr=t["importance_std"], color=color,
+            error_kw={"ecolor": plots.INK_MUTED, "capsize": 3, "linewidth": 1})
+    ax.set_yticks(range(len(t)), t.index)
+    ax.axvline(0, color=plots.INK_MUTED, linewidth=1)
+    plots.style_axes(ax, title, xlabel="drop in validation PR-AUC when shuffled (mean ± SD over 30 repeats)")
+    ax.grid(axis="x", color=plots.GRIDLINE, linewidth=0.8)"""),
+
+    md("""### 16.1 Permutation importance per feature (logistic regression)
+
+- **What is shown:** for each of the 21 inputs, how much validation PR-AUC drops when that one column is shuffled
+  across the validation rows (bars: mean over 30 shuffles; whiskers: their standard deviation).
+- **How it is calculated:** `sklearn.inspection.permutation_importance` on the whole fitted pipeline (raw columns in,
+  imputation and scaling inside), `scoring="average_precision"`, `n_repeats=30`, `random_state=42`. Nothing is refitted.
+- **Caveat specific to this table:** shuffling `quali_position` on its own leaves `has_quali` unchanged, which can
+  create combinations that never occur in the data (a qualifying position on a row flagged "no qualifying"). On
+  validation almost every row has a qualifying position, so the effect is small, but the group view (16.2) avoids it."""),
+    code("""pi_lr = xai.feature_permutation_importance(lr_pipe, Xv, yv)
+print(f"baseline validation PR-AUC: {pi_lr.attrs['baseline_pr_auc']:.4f}")
+display(pi_lr.round(4))
+fig, ax = plots.new_figure(height=6.6)
+importance_plot(ax, pi_lr, "Logistic regression: permutation importance per feature (validation)", plots.SERIES[0])
+fig.tight_layout()
+plt.show()"""),
+    md("""**What it suggests.**
+- **The model leans overwhelmingly on the starting grid.** Shuffling `grid_filled` drops validation PR-AUC by 0.239 ± 0.043,
+  from 0.726 to about 0.49. Next come `drv_points_before` (0.040), `quali_position` (0.031) and `con_points_before`
+  (0.019). Every other feature is below 0.007.
+- **Many features change nothing measurable,** and a few are slightly negative (`con_mean_pos_last3` −0.006 ± 0.005,
+  `con_podium_rate_last5` −0.005 ± 0.009): shuffling them happened to help a little on these rows. That is noise of the
+  same kind as in the ablation, where dropping constructor form scored +0.006.
+- **`has_quali` is exactly 0:** almost every validation row has a qualifying position, so there is nothing to shuffle.
+
+**What it does NOT prove.** A small importance does not make a feature useless: its correlated partner can stand in for it
+when it alone is shuffled (`drv_rank_before` for `drv_points_before`, last-3 for last-5 form). The numbers describe *this
+fitted model on 2020–2021*, and show reliance, not causal effect."""),
+
+    md("""### 16.2 Permutation importance per feature group (logistic regression)
+
+- **What is shown:** the drop in validation PR-AUC when **all columns of a group are shuffled together**, using the seven
+  groups of the ablation (13.4).
+- **How it is calculated:** for each group and each of 30 repeats, one random row permutation is applied to all of the
+  group's columns at once (`xai.group_permutation_importance`, seed 42), so values *within* a group stay consistent
+  (for example `quali_position` with `has_quali`). Only their link to the other groups and to the outcome is broken. A
+  test checks that exactly the group's columns move, jointly.
+- **Compared with the ablation (13.4):** the ablation *refits* the model without a group, so the remaining correlated
+  groups can take over. Permutation keeps the *fitted* model and removes the group's information from its inputs, so
+  it measures how much this model relies on the group. Expect permutation drops to be larger."""),
+    code("""gpi_lr = xai.group_permutation_importance(lr_pipe, Xv, yv)
+abl_drop = -abl_boot.loc[[f"without {g}" for g in gpi_lr.index], "pr_auc_diff"].to_numpy()
+group_cmp = gpi_lr.assign(**{"ablation drop (13.4, refitted)": abl_drop}).round(4)
+display(group_cmp)
+fig, ax = plots.new_figure(height=4.2)
+importance_plot(ax, gpi_lr, "Logistic regression: permutation importance per feature group (validation)",
+                plots.SERIES[0])
+fig.tight_layout()
+plt.show()"""),
+    md("""**What it suggests.**
+- **Grid first (0.247 ± 0.036), then season standings (0.076 ± 0.026), then qualifying (0.031 ± 0.017).** Constructor form
+  (0.007), driver form (0.003), reliability and home (about 0) add nothing measurable.
+- **The standings group (0.076) matters more than any of its members alone** (largest single member 0.040). The four
+  standings columns carry overlapping information, so shuffling one leaves the others to compensate. This is the
+  credit-splitting caveat in action.
+- **Against the ablation (13.4):** grid 0.247 here vs 0.020 when refitted without it, standings 0.076 vs 0.019, qualifying
+  0.031 vs 0.003. A refitted model recovers most of a missing group from correlated ones (on validation, qualifying
+  position is nearly the grid). The fitted model, however, relies on these inputs as they are. Both views agree on the
+  order of the top two groups and on form, reliability and home adding about nothing.
+
+**What it does NOT prove.** A group importance is the *fitted model's* reliance on that block of inputs on 39 races. It does
+not show that grid position *causes* podiums, and it says nothing about groups the model could use if trained differently."""),
+
+    md("""### 16.3 SHAP for logistic regression
+
+- **What is shown:** (left) a beeswarm: one dot per validation row and feature, placed at that feature's SHAP value for
+  the row and coloured by the feature's value (red high, blue low); (right) the mean absolute SHAP value per feature.
+- **How it is calculated:** `shap.LinearExplainer` on the classifier step, applied to the **transformed** (imputed and
+  standardised) matrix, with **all 22,624 training rows as background** (an explicit masker; shap would otherwise
+  subsample 100 rows). Values are in **log-odds**. For each row, base value + sum of SHAP values = the model's log-odds
+  (tested). For a linear model SHAP is simply `coefficient × (x − background mean)`. The background mean of a
+  standardised column is 0, so the importance follows |coefficient| × how far validation values sit from the
+  training average. Transformed names are mapped back to the original feature names (here they are identical)."""),
+    code("""shap_lr = xai.linear_shap(lr_pipe, Xtr, Xv)
+check = shap_lr.values.sum(axis=1) + shap_lr.base_values
+assert np.allclose(check, lr_pipe.named_steps["clf"].decision_function(xai.transformed_frame(lr_pipe, Xv)), atol=1e-6)
+print(f"base value (log-odds at the training mean): {shap_lr.base_values[0]:.3f} "
+      f"= probability {1 / (1 + np.exp(-shap_lr.base_values[0])):.3f}")
+msh_lr = xai.mean_abs_shap(shap_lr)
+coef_cmp = pd.DataFrame({"mean |SHAP| (val)": msh_lr, "coefficient (10.2)": coef_table["coef"],
+                         "mean |x − train mean| (val, standardised)":
+                             xai.transformed_frame(lr_pipe, Xv).abs().mean()}).loc[msh_lr.index]
+display(coef_cmp.round(3))
+
+shap.plots.beeswarm(shap_lr, max_display=21, show=False, plot_size=(9, 7.5))
+plt.title("Logistic regression: SHAP values on validation (log-odds)", loc="left", fontsize=12)
+plt.tight_layout()
+plt.show()
+fig, ax = plots.new_figure(height=6.6)
+t = msh_lr.iloc[::-1]
+ax.barh(range(len(t)), t.to_numpy(), color=plots.SERIES[0])
+ax.set_yticks(range(len(t)), t.index)
+plots.style_axes(ax, "Logistic regression: mean |SHAP| per feature (validation)", xlabel="mean |SHAP| (log-odds)")
+ax.grid(axis="x", color=plots.GRIDLINE, linewidth=0.8)
+fig.tight_layout()
+plt.show()"""),
+    md("""**What it suggests.**
+- **The base value is −3.33 log-odds (probability 0.035):** the model's output for the *average training input*. That is
+  not the average predicted probability (13.4%), because the logistic link is not linear.
+- **`grid_filled` dominates SHAP as well** (mean |SHAP| 1.11 log-odds): the colours show low grid numbers (pole, front row)
+  pushing the log-odds up by up to about +2.4.
+- **Agreement with the coefficients (10.2):** for a linear model SHAP is exactly coefficient × (value − training mean), so
+  every feature's direction is its coefficient's sign. The *ranking* differs from |coefficient| where validation values
+  sit far from the training average.
+  - **`has_quali`** (coefficient −0.31, but its validation values sit 1.31 SD from the training mean) becomes 2nd with
+    mean |SHAP| 0.40.
+  - **`quali_position`** becomes 3rd with 0.38.
+  - **`con_races_before`** (coefficient 0.057, 1.89 SD away) gets 0.107.
+  This is an **era effect:** compared with the 1950–2019 average row, every 2020–2021 row has qualifying data and
+  long-established constructors.
+- **`has_quali` is a constant offset here:** about −0.40 log-odds for every validation row. It moves all rows equally, so
+  it does not change their order, which is why its permutation importance (16.1) is 0. A large mean |SHAP| means
+  "different from the training average", not "used to separate drivers in this period".
+- **`con_points_before` pushes high values *down*** (red dots on the left), although more points is better. Given
+  constructor rank and driver points, which carry the same information, the model uses it as a correction (negative
+  coefficient, 10.2). Correlated inputs share and offset credit; this is not "more points cause fewer podiums".
+
+**What it does NOT prove.** SHAP values explain the model's log-odds relative to the training average. They are predictive
+association and model reliance, not the causal effect of changing an input."""),
+
+    md("""### 16.4 Does HistGradientBoosting rely on the same features?
+
+- **What is shown:** the same permutation importances (per feature and per group) and mean |SHAP| for the fitted
+  HistGradientBoosting model, next to logistic regression, plus the agreement of the two rankings (Spearman rank
+  correlation over the 21 features, and the overlap of the top 5).
+- **How it is calculated:** permutation exactly as in 16.1–16.2. SHAP via `shap.TreeExplainer` with the
+  **tree-path-dependent** algorithm and raw log-odds output. Its implicit background is the training data (the number
+  of training rows that reached each tree node). The trees use unscaled imputed inputs, but SHAP values are in
+  log-odds for both models, so their sizes are comparable. Additivity (base + SHAP = raw log-odds) is asserted.
+- **Why not the "interventional" algorithm with an explicit train sample, as for logistic regression:** with
+  shap 0.52 on this fitted model its values did not add up to the model output (gap up to 0.29 log-odds on validation
+  rows, although the base value was correct), while the path-dependent values add up to 1e-14. The two LR and HistGB
+  baselines are therefore defined slightly differently (train mean input vs. train cover of the trees); both are the
+  training data."""),
+    code("""pi_hgb = xai.feature_permutation_importance(hgb_pipe, Xv, yv)
+gpi_hgb = xai.group_permutation_importance(hgb_pipe, Xv, yv)
+shap_hgb = xai.tree_shap(hgb_pipe, Xv)
+assert np.allclose(shap_hgb.values.sum(axis=1) + shap_hgb.base_values,
+                   hgb_pipe.named_steps["clf"].decision_function(xai.transformed_frame(hgb_pipe, Xv)), atol=1e-4)
+msh_hgb = xai.mean_abs_shap(shap_hgb)
+
+both_feat = pd.DataFrame({
+    "LR permutation": pi_lr["importance_mean"], "HGB permutation": pi_hgb["importance_mean"],
+    "LR mean |SHAP|": msh_lr, "HGB mean |SHAP|": msh_hgb}).loc[pi_lr.index]
+both_group = pd.DataFrame({"LR group permutation": gpi_lr["importance_mean"],
+                           "HGB group permutation": gpi_hgb["importance_mean"]}).loc[gpi_lr.index]
+display(both_feat.round(4))
+display(both_group.round(4))
+agree = pd.DataFrame({
+    "permutation, per feature": xai.rank_agreement(pi_lr["importance_mean"], pi_hgb["importance_mean"]),
+    "mean |SHAP|, per feature": xai.rank_agreement(msh_lr, msh_hgb),
+    "permutation, per group": xai.rank_agreement(gpi_lr["importance_mean"], gpi_hgb["importance_mean"], top=3),
+}).T
+display(agree)
+
+fig, axes = plt.subplots(1, 3, figsize=(16, 6.6), facecolor=plots.SURFACE,
+                         gridspec_kw={"width_ratios": [1.15, 1.15, 0.9]})
+order = both_feat.index[::-1]
+ys, h = np.arange(len(order)), 0.4
+for ax, (a_col, b_col, title, xlabel) in zip(axes[:2], [
+        ("LR permutation", "HGB permutation", "Permutation importance per feature", "drop in validation PR-AUC"),
+        ("LR mean |SHAP|", "HGB mean |SHAP|", "Mean |SHAP| per feature", "mean |SHAP| (log-odds)")]):
+    ax.set_facecolor(plots.SURFACE)
+    ax.barh(ys + h / 2, both_feat.loc[order, a_col], h, color=plots.SERIES[0], label="logistic regression")
+    ax.barh(ys - h / 2, both_feat.loc[order, b_col], h, color=plots.SERIES[2], label="hist gradient boosting")
+    ax.set_yticks(ys, order)
+    plots.style_axes(ax, title, xlabel=xlabel)
+    ax.grid(axis="x", color=plots.GRIDLINE, linewidth=0.8)
+axes[1].set_yticklabels([])
+g_order = both_group.index[::-1]
+gy = np.arange(len(g_order))
+axes[2].set_facecolor(plots.SURFACE)
+axes[2].barh(gy + h / 2, both_group.loc[g_order, "LR group permutation"], h, color=plots.SERIES[0],
+             xerr=gpi_lr.loc[g_order, "importance_std"], error_kw={"ecolor": plots.INK_MUTED, "capsize": 2})
+axes[2].barh(gy - h / 2, both_group.loc[g_order, "HGB group permutation"], h, color=plots.SERIES[2],
+             xerr=gpi_hgb.loc[g_order, "importance_std"], error_kw={"ecolor": plots.INK_MUTED, "capsize": 2})
+axes[2].set_yticks(gy, g_order)
+plots.style_axes(axes[2], "Permutation importance per group", xlabel="drop in validation PR-AUC")
+axes[2].grid(axis="x", color=plots.GRIDLINE, linewidth=0.8)
+axes[0].legend(frameon=False, fontsize=9, labelcolor=plots.INK_MUTED, loc="lower right")
+fig.tight_layout()
+plt.show()"""),
+    md("""**What it suggests.**
+- **At the level of information the two models agree.** The group rankings correlate at 0.89 (Spearman, 7 groups). Both
+  put grid first by far (LR 0.247, HistGB 0.274) and season standings second (0.076 vs 0.032). HistGB leans a little more on
+  form (constructor 0.015, driver 0.011) and less on qualifying (0.009 vs 0.031).
+- **Feature by feature they differ:**
+  - **Rank correlation:** 0.37 for permutation and 0.54 for mean |SHAP|.
+  - **Top-5 overlap:** 3 features for permutation (`grid_filled`, `quali_position`, `con_points_before`) and 2 for SHAP
+    (`grid_filled`, `con_rank_before`).
+  - **Within the standings group:** LR relies on `drv_points_before` (permutation 0.040; HistGB 0.003), while HistGB relies
+    on `drv_rank_before` (0.026; LR 0.007). This is the same information carried by a different member.
+  - **Credit spread:** HistGB also spreads credit across form and career columns (mean |SHAP| `con_podium_rate_last5` 0.21
+    vs 0.09, `drv_races_before` 0.15 vs 0.05).
+- **`pit_lane_start` is 0 for HistGB** (its trees never split on this rare flag), and `has_quali` is much smaller (0.10 vs
+  0.40 mean |SHAP|).
+- **Conclusion:** both models use the same information (starting order first, then the season so far), but they divide the
+  credit differently within correlated groups. Per-feature importances are therefore properties of a model, not stable
+  facts about the data, and the group view is the more robust summary.
+
+**What it does NOT prove.** Agreement between two models fitted on the same data is not evidence that the shared features
+*cause* podiums: both learn the same associations. The two SHAP algorithms also differ (see above), so values are compared
+as rankings, not number by number."""),
+
+    md("""### 16.5 Local explanations: three validation rows
+
+**Which rows, and why** (chosen by a fixed rule, `xai.pick_local_rows`, on the logistic-regression validation
+probabilities and its frozen threshold 0.276):
+- **confident correct podium:** the podium finisher the model rated highest (a true positive);
+- **false negative:** the podium finisher the model rated lowest (its most confident miss);
+- **false positive:** the non-podium driver the model rated highest (its most confident false alarm).
+
+For each row: a **SHAP waterfall** (log-odds, starting from the base value at the training mean and adding one feature
+at a time; the grey numbers are the row's raw input values) and a **LIME** explanation. LIME samples 5,000 perturbed
+rows around the case on the transformed training distribution, with continuous features discretised into quartile
+bins. It then fits a weighted linear surrogate to the classifier's podium probability and reports the 10 largest
+weights, in probability units, for conditions such as `quali_position <= -0.83` (standardised units). The table under
+each row puts the two side by side."""),
+    code("""v_scores = pd.Series(val_scores["logistic regression"], index=vrows_16)
+thr_lr = float(cmp_all.loc["logistic regression", "threshold"])
+local_rows = xai.pick_local_rows(yv, v_scores, thr_lr)
+races_ix, drivers_ix = tables["races"].set_index("raceId"), tables["drivers"].set_index("driverId")
+finish = results_clean.set_index(["raceId", "driverId"])["positionOrder"]
+local_table = pd.DataFrame([{
+    "reason": reason, "year": int(meta.loc[i, "year"]),
+    "race": races_ix.loc[meta.loc[i, "raceId"], "name"],
+    "driver": f"{drivers_ix.loc[meta.loc[i, 'driverId'], 'forename']} {drivers_ix.loc[meta.loc[i, 'driverId'], 'surname']}",
+    "grid": X.loc[i, "grid_filled"], "quali": X.loc[i, "quali_position"],
+    "probability": v_scores[i], "threshold": thr_lr, "predicted podium": bool(v_scores[i] >= thr_lr),
+    "actual podium": int(y.loc[i]),
+    "finished (after the race; not an input)": int(finish.loc[(meta.loc[i, "raceId"], meta.loc[i, "driverId"])]),
+} for reason, i in local_rows.items()]).set_index("reason")
+display(local_table.style.format({"grid": "{:.0f}", "quali": "{:.0f}", "probability": "{:.3f}", "threshold": "{:.3f}"}))
+
+lime_results = {}
+
+def explain_row(reason):
+    i = local_rows[reason]
+    k = Xv.index.get_loc(i)
+    who = f"{local_table.loc[reason, 'driver']}, {local_table.loc[reason, 'year']} {local_table.loc[reason, 'race']}"
+    shap.plots.waterfall(shap_lr[k], max_display=10, show=False)
+    plt.gcf().set_size_inches(9, 5.2)
+    plt.title(f"SHAP waterfall (log-odds): {reason}: {who}", loc="left", fontsize=11)
+    plt.tight_layout()
+    plt.show()
+    exp = xai.lime_explanation(lr_pipe, Xtr, Xv.loc[[i]])
+    lime_results[reason] = exp
+    fig = exp.as_pyplot_figure(label=1)
+    fig.set_size_inches(9, 4.6)
+    fig.axes[0].set_title("")                                         # LIME's own centred title would overlap
+    fig.axes[0].set_title(f"LIME (podium probability weights): {reason}: {who}", loc="left", fontsize=11)
+    fig.axes[0].set_xlabel("LIME weight (podium probability)")
+    fig.tight_layout()
+    plt.show()
+    lime_w = dict(exp.as_map()[1])
+    lime_cond = dict(zip([f for f, _ in exp.as_map()[1]], [c for c, _ in exp.as_list(label=1)]))
+    sv = pd.Series(shap_lr.values[k], index=shap_lr.feature_names)
+    cols = [Xv.columns[j] for j in lime_w]
+    side = pd.DataFrame({
+        "raw value": Xv.loc[i, cols].to_numpy(),
+        "LIME condition (standardised)": [lime_cond[j] for j in lime_w],
+        "LIME weight (probability)": list(lime_w.values()),
+        "SHAP (log-odds)": sv[cols].to_numpy(),
+        "SHAP rank (of 21)": sv.abs().rank(ascending=False)[cols].astype(int).to_numpy(),
+    }, index=cols)
+    side["same sign"] = np.sign(side["LIME weight (probability)"]) == np.sign(side["SHAP (log-odds)"])
+    display(side.round(3))
+    top5_shap = set(sv.abs().nlargest(5).index)
+    print(f"model probability {v_scores[i]:.3f} | LIME surrogate prediction {float(np.ravel(exp.local_pred)[0]):.3f}, "
+          f"surrogate R² {exp.score:.3f} | sign agreement {int(side['same sign'].sum())}/{len(side)} | "
+          f"LIME top 10 contains {len(top5_shap & set(cols))} of SHAP's top 5")
+
+explain_row("confident correct podium")"""),
+    code("""explain_row("false negative")"""),
+    code("""explain_row("false positive")"""),
+    md("""**The three rows.**
+
+| reason | driver, race | grid / quali | probability | result |
+|---|---|---|---|---|
+| confident correct podium | Lewis Hamilton, 2020 Bahrain GP | 1 / 1 | 0.883 | won (1st) |
+| false negative | Max Verstappen, 2021 Russian GP | 20 / 20 | 0.009 | 2nd |
+| false positive | Lewis Hamilton, 2020 Italian GP | 1 / 1 | 0.867 | 7th |
+
+**What the SHAP waterfalls suggest.**
+- **Correct podium:** pole position (+2.36 log-odds), driver points (+1.62) and qualifying (+0.77) outweigh the negative
+  constructor-points correction (−1.13) and the constant `has_quali` offset (−0.40).
+- **False negative:** starting 20th dominates (grid −1.74, qualifying −0.67). The championship evidence (driver points
+  +1.18, ranks +0.43 / +0.34) cannot compensate. An additive model adds evidence up; it cannot represent "a title
+  contender starting at the back recovers", which is an interaction between grid and strength.
+- **False positive:** the explanation is almost the same as for the correct podium (pole: +2.36). Nothing in the pre-race
+  inputs distinguishes the two rows. The outcome was decided in the race; according to race reports, Hamilton received a
+  stop-go penalty for entering a closed pit lane. The model cannot see that, and this is not something to fix with
+  features available at the cutoff.
+
+**LIME vs SHAP on the same rows.**
+- **Where they agree:** on direction. In all three rows the sign of every LIME weight matches the SHAP value of that
+  feature (10 of 10), and LIME's top 10 contains SHAP's top 5.
+- **Where they disagree:** on size and order. `pit_lane_start` is LIME's 2nd feature (+0.06) but 20th of 21 for SHAP (0.006).
+  LIME weights the *condition* "not a pit-lane start" against perturbed samples drawn from the training distribution,
+  where pit-lane starts do occur. SHAP compares with the training mean, where the flag is about 0 anyway. `is_round_1`
+  behaves the same way.
+- **LIME is coarse here:** the two Hamilton rows fall into the same quartile bins for all ten features, so LIME gives them
+  practically identical weights. SHAP separates them (driver points +1.62 vs +0.79).
+- **LIME's surrogate is not faithful at these rows:** it predicts 0.270 for both Hamilton rows where the model says 0.883
+  and 0.867 (surrogate R² 0.68), and 0.025 vs 0.009 for Verstappen (R² 0.30). Its weights describe a linear fit, in
+  probability units, over a broad sampled neighbourhood, not the model at this point.
+- **Reading:** for a logistic regression, SHAP is exact and additive in log-odds, so it is the reliable local explanation.
+  LIME is shown for comparison, and its disagreements come from the method (sampling, discretisation, probability scale),
+  not from the model.
+
+**What it does NOT prove.** A local explanation says which inputs moved *this model's* score for *this row*. It does not say
+why the driver did or did not finish on the podium, and three hand-picked rows are illustrations, not evidence about the
+model as a whole."""),
+
+    md("""### 16.6 Summary and limits"""),
+    code("""assert _file_state(final_test_path) == test_log_before_16, "section 16 must not touch the test log"
+assert len(pd.read_csv(final_test_path)) == 6
+print(f"test log unchanged (6 rows) | section 16 runtime: {time.perf_counter() - t0_16:.1f} s")"""),
+    md("""**Summary (validation rows only; test untouched; nothing refitted).**
+- **Final model (LR):** relies first on the starting grid, then on the season so far (standings), then on qualifying. Form,
+  reliability and home add nothing measurable.
+- **HistGB:** relies on the same information in the same order, but divides the credit differently between correlated
+  features.
+- **SHAP vs coefficients:** SHAP follows the coefficients' signs exactly. Its ranking adds an era effect (`has_quali`,
+  `quali_position`), because the training years differ from 2020–2021.
+- **Local explanations:** they show the model's blind spot, a strong driver starting at the back after a penalty, and
+  in-race events it cannot know. LIME agrees with SHAP on direction but not on size, and is not faithful at the explained rows.
+
+**Limits.**
+- **Not causal:** explanations show predictive association and model reliance, not causal effects.
+- **Correlated features split credit:** for both permutation (understates each member) and SHAP (divides the effect), so the
+  group results are the safer reading.
+- **Small sample:** 39 validation races. The ± values are the spread over the 30 shuffles, not uncertainty about future
+  seasons.
+- **Different SHAP algorithms:** interventional with the training mean for LR, tree-path-dependent for HistGB. Their sizes are
+  compared as rankings.
+- **LIME depends on settings:** seed 42, 5,000 samples, quartile discretisation; other settings give other weights.
+- **Runtime:** about 30 seconds (printed above)."""),
 
 ]
 
