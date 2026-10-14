@@ -42,7 +42,7 @@ Goal: for each driver in each race, predict whether they finish on the podium
 Sections: **1** Setup, **2** Data Loading, **3** Raw Data Audit, **4** Audit follow-ups,
 **5** Findings → open decisions, **6** Cleaning, **7** Post-cleaning EDA, **8** Data-engineering questions,
 **9** Modeling table, **10** Evaluation harness and baselines, **11** Tree models and model comparison,
-**12** Shallow neural network.
+**12** Shallow neural network, **13** Experiments (training window, preprocessing, ablation).
 Sections 3–4 only *measure* the raw data;
 cleaning happens only in section 6, following decisions recorded in the notebook.
 Reusable code lives in `src/f1podium/`."""),
@@ -2708,6 +2708,334 @@ print("selected by the rule:", selected)"""),
   more accurate. The data cannot separate the four learned models on 39 races; when evidence is a tie, the rule prefers
   the model that can be explained and audited. Nothing has been evaluated on test. If you accept the rule as written,
   that choice and its frozen threshold are what the one-off test run would use."""),
+
+    md("""## 13. Experiments (validation only)
+
+Three experiments on the model chosen by the rule in 12.6: **logistic regression with its frozen parameters**
+(`models.LR_PARAMS`, not re-tuned). Code: `src/f1podium/experiments.py`.
+
+**Rules that still apply**
+- Every variant is fitted on train rows and scored on **validation (2020–2021) only**. Each variant gets its own
+  F1-optimal threshold on validation, exactly as in sections 10–12. **The test split is not read**, and
+  `final_test_report` is not called (checked at the end of the section).
+- Nothing in this section changes the frozen model. A "decision" below is a recommendation for later, to be approved
+  separately; it is not applied here.
+
+**Limits that apply to every result here**
+- **Validation has 39 races (780 rows, 117 podiums).** All intervals are paired race-level bootstraps (B = 1000,
+  seed 42, the same resampled races for both variants of a pair).
+- **An interval that includes 0 means "not distinguishable at this sample size"**, not "no difference".
+- **Selection on validation is slightly optimistic:** if a variant were adopted because it scored best on these 39
+  races, its validation score would overstate how well it does on new races."""),
+    code("""import time
+from f1podium import experiments as xp
+
+t0_13 = time.perf_counter()
+test_log_before_13 = _file_state(final_test_path)
+vrows_13 = ev.split_rows(meta, "validation")
+yv_13 = y.loc[vrows_13].to_numpy()
+race_13 = meta.loc[vrows_13, "raceId"].to_numpy()
+print(f"validation: {len(vrows_13)} rows, {len(np.unique(race_13))} races, {int(yv_13.sum())} podiums "
+      f"(base rate {yv_13.mean():.3f})")
+
+VIEW_13 = ["train_n", "val_base_rate", "val_pr_auc", "val_pr_auc_over_base_rate", "val_roc_auc", "threshold",
+           "val_f1", "val_precision", "val_recall"]
+FMT_13 = {"train_n": "{:,.0f}", "val_base_rate": "{:.1%}", "val_pr_auc": "{:.3f}",
+          "val_pr_auc_over_base_rate": "{:.2f}x", "val_roc_auc": "{:.3f}", "threshold": "{:.3f}", "val_f1": "{:.3f}",
+          "val_precision": "{:.3f}", "val_recall": "{:.3f}", "pr_auc_diff": "{:+.3f}", "ci_low": "{:+.3f}",
+          "ci_high": "{:+.3f}", "share_a_better": "{:.1%}"}
+
+def boot_13(scores, pairs):
+    b = ev.paired_race_bootstrap(yv_13, scores, race_13, pairs, B=config.BOOTSTRAP_B, seed=config.RANDOM_SEED)
+    b["interval includes 0"] = ~((b["ci_low"] > 0) | (b["ci_high"] < 0))
+    assert (b["skipped"] == 0).all()
+    return b"""),
+
+    md("""### 13.1 Training window
+
+- **Hypothesis:** older seasons (different cars, points systems, 1950s–80s grids without qualifying data) may teach
+  the model patterns that no longer hold, so a later start could do better on 2020–2021 despite fewer rows.
+  The opposite is also plausible: more rows give more stable coefficients.
+- **Change:** the first training season (`config.TRAIN_START_CANDIDATES`: 1950, 1996, 2003, 2014); the last stays 2019.
+  **The whole pipeline, imputer and scaler included, is fitted on the window's train rows only.** Features are
+  unchanged: rolling form and standings still look back across earlier races, which is allowed (they are built from
+  races before each row's race). Validation rows are identical for all four windows.
+- **Why these years:** 1996 is the first season after qualifying data becomes routine (1994–95 are patchy), 2003 the
+  start of near-complete qualifying data (the window of section 8), 2014 the start of the hybrid era."""),
+    code("""win_table, win_scores = xp.run_window(meta, X, y)
+assert win_table["val_n"].nunique() == 1
+win_boot = boot_13(win_scores, [(s, 1950) for s in config.TRAIN_START_CANDIDATES if s != 1950]).set_index("model")
+win_view = win_table[VIEW_13].join(win_boot[["pr_auc_diff", "ci_low", "ci_high", "share_a_better", "interval includes 0"]])
+win_view.index.name = "train from"
+display(win_view.style.format(FMT_13, na_rep="ref"))
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4.6), facecolor=plots.SURFACE)
+for ax in axes:
+    ax.set_facecolor(plots.SURFACE)
+starts = list(win_table.index)
+xs = np.arange(len(starts))
+axes[0].plot(xs, win_table["val_pr_auc"], "o-", color=plots.SERIES[0], linewidth=1.8, label="validation PR-AUC")
+axes[0].plot(xs, win_table["val_roc_auc"], "s-", color=plots.SERIES[1], linewidth=1.8, label="validation ROC-AUC")
+for x_, (pr, n_) in enumerate(zip(win_table["val_pr_auc"], win_table["train_n"])):
+    axes[0].annotate(f"{n_:,} train rows", (x_, pr), textcoords="offset points", xytext=(0, 9), ha="center",
+                     fontsize=8.5, color=plots.INK_MUTED)
+axes[0].set_xticks(xs, [str(s) for s in starts])
+plots.style_axes(axes[0], "Validation score by first training season", xlabel="first training season",
+                 ylabel="score")
+axes[0].legend(frameon=False, fontsize=9, labelcolor=plots.INK_MUTED, loc="center right")
+d = win_boot.reindex(starts)
+diff = d["pr_auc_diff"].fillna(0).to_numpy()
+err = np.vstack([diff - d["ci_low"].fillna(0).to_numpy(), d["ci_high"].fillna(0).to_numpy() - diff])
+axes[1].errorbar(xs, diff, yerr=err, fmt="o", color=plots.SERIES[0], capsize=5, linewidth=1.6)
+axes[1].axhline(0, color=plots.INK_MUTED, linewidth=1, linestyle=":")
+axes[1].set_xticks(xs, [f"{s}\\n(reference)" if s == 1950 else str(s) for s in starts])
+plots.style_axes(axes[1], "Validation PR-AUC minus 1950 window (95% paired race bootstrap)",
+                 xlabel="first training season", ylabel="Δ PR-AUC")
+fig.tight_layout()
+plt.show()"""),
+    md("""**Result.**
+
+| first season | train rows | val PR-AUC | Δ vs 1950 (95% CI) | ROC-AUC | F1 |
+|---|---|---|---|---|---|
+| 1950 | 22,624 | 0.726 | reference | 0.927 | 0.702 |
+| 1996 | 9,329 | 0.718 | −0.008 (−0.018 to +0.002) | 0.925 | 0.700 |
+| 2003 | 6,824 | 0.726 | +0.000 (−0.013 to +0.010) | 0.926 | 0.698 |
+| 2014 | 2,486 | 0.710 | −0.016 (−0.033 to −0.002) | 0.921 | 0.694 |
+
+**Interpretation.**
+- **The older seasons do not hurt.** Starting in 1996 or 2003 gives the same validation PR-AUC as 1950 within noise
+  (both intervals include 0), even though 59–70% of the training rows are dropped.
+- **Starting in 2014 is worse,** and it is the only interval that excludes 0 (just: its upper end is −0.002). With
+  2,486 rows (six seasons) the coefficients are estimated less precisely, and the more recent data does not make up for it.
+- **The F1 values (0.694–0.702) are all within 0.008**, about one podium more or less out of 117.
+- The hypothesis that old eras teach outdated patterns is **not supported** for this linear model; the hypothesis that
+  more rows help is supported only at the extreme (2014).
+
+**Decision (Recommendation):** keep the frozen window (1950–2019). No shorter window is better, and choosing 2003 because
+it ties would be a choice made on validation with nothing to gain. The 2014 result is a reason *not* to train on the
+hybrid era only."""),
+
+    md("""### 13.2 Experiment A: preprocessing fitted on train vs on train + validation (leakage demo)
+
+- **The textbook mistake** is to fit the imputer and scaler on *everything*, test included, before splitting. The
+  model then sees summary statistics of the rows it will be judged on. **We simulate it with train + validation
+  only, so the test set stays sealed;** the mechanism is the same, with validation playing the role of test.
+- **Hypothesis:** the leak is real but small here. Only medians, means and standard deviations leak (no labels), and
+  the 780 validation rows are about 3% of the 23,404 train + validation rows, so the statistics should move little.
+- **Change:** the imputer and scaler are fitted on train + validation rows; the classifier is still fitted on train
+  rows only. Everything else is identical. The "train" variant is the normal pipeline (asserted below)."""),
+    code("""a_table, a_scores, a_models = xp.run_prep_rows(meta, X, y)
+assert np.allclose(a_scores["prep fitted on train"], val_scores["logistic regression"])   # = the frozen model
+cols_a = ["grid_filled", "quali_position", "drv_rank_before", "drv_races_before", "con_mean_pos_last5"]
+stats_a = pd.concat({k.replace("prep fitted on ", "fitted on "): xp.prep_statistics(m, cols_a)
+                     for k, m in a_models.items()}, axis=1)
+print("Before / after: preprocessing statistics (the leaked quantities)")
+display(stats_a.round(3))
+print("Before / after: validation metrics")
+display(a_table[VIEW_13].style.format(FMT_13))
+a_boot = boot_13(a_scores, [("prep fitted on train+val", "prep fitted on train")])
+display(a_boot[["model", "versus", "pr_auc_diff", "ci_low", "ci_high", "share_a_better", "interval includes 0"]]
+        .style.format(FMT_13))
+sa, sb = a_scores["prep fitted on train"], a_scores["prep fitted on train+val"]
+print(f"largest change in a validation probability: {np.abs(sa - sb).max():.4f} | "
+      f"rows whose predicted label flips at their own thresholds: "
+      f"{int(((sa >= a_table.iloc[0]['threshold']) != (sb >= a_table.iloc[1]['threshold'])).sum())}")"""),
+    md("""**Result.**
+- **The leaked statistics move very little.** Medians are unchanged except `drv_races_before` (41 → 42), which also has
+  the largest shift in mean and SD (61.7 → 63.7 and 62.0 → 64.3): the 2020–2021 grid is full of long careers.
+  `quali_position`'s SD rises from 3.87 to 3.95, because almost every validation row has a qualifying position whereas
+  63% of train rows do not.
+- **Validation metrics are practically unchanged:** PR-AUC 0.726 → 0.725 (Δ −0.001, 95% CI −0.002 to +0.000). ROC-AUC,
+  threshold, F1, precision and recall are equal to three decimals, no predicted label flips, and the largest change in
+  any validation probability is 0.0025.
+
+**Interpretation.**
+- **Here the leak is harmless in size and even slightly *lowers* the score.** That is the point of the demo: a leak does
+  not always inflate a number, so "the result looks fine" is no evidence that the procedure is clean. What is wrong is
+  the procedure: the evaluation rows influenced the model.
+- **It is small because of what leaks and how much:** only feature statistics (no labels), from 780 rows against 22,624.
+  With a small training set, a large test set or target-dependent preprocessing (target encoding, feature selection on
+  all rows, oversampling before the split) the same mistake would inflate scores visibly.
+- The textbook version (test included) was not run, so the test set stays sealed.
+
+**Decision (Requirement, unchanged):** preprocessing stays fitted on train rows only, inside the pipeline (tested in
+`tests/test_evaluation.py` and `tests/test_experiments.py`)."""),
+
+    md("""### 13.3 Experiment B: impute → scale vs scale → impute (hypothesis check)
+
+- **Prediction (hypothesis): the two orders are equivalent.** For a column with gaps, impute → scale gives
+  `(x_filled − m₁) / s₁`; scale → impute gives `(x − m₂) / s₂` with the gaps filled by `(median − m₂) / s₂`, which is the
+  same median-filled column under a different shift and scale (m₂, s₂ are computed on the observed values only).
+  Both are affine transforms of the same values, so a linear model or a network could represent exactly the same
+  functions either way.
+- **Change:** the order of the two steps (`build_preprocessor(order="scale_impute")`), for **logistic regression** and
+  for the **frozen neural-network configuration from 12.1** (one fixed seed 42, the same early stopping on validation
+  PR-AUC). Only columns with missing values are affected.
+- **What could break the equivalence:** the L2 penalty in logistic regression and the weight decay / initialisation /
+  Adam steps of the network are *not* invariant to rescaling a column: a column with a smaller spread needs a larger
+  weight for the same effect, and a larger weight costs more penalty."""),
+    code("""b_table, b_scores, b_models = xp.run_prep_order(meta, X, y, nn_params=nn_best, nn_fixed=config.NN_FIXED)
+assert np.allclose(b_scores["logistic regression | impute→scale"], val_scores["logistic regression"])
+assert np.array_equal(b_scores["neural network | impute→scale"], nn_val_scores)          # = section 12's network
+nan_cols = X.columns[X.loc[ev.split_rows(meta, "train")].isna().any()].tolist()
+print("train columns with missing values (the only ones the order can affect):", nan_cols)
+display(b_table[VIEW_13 + ["best_epoch"]].style.format({**FMT_13, "best_epoch": "{:.0f}"}, na_rep="–"))
+b_pairs = [(f"{m} | scale→impute", f"{m} | impute→scale") for m in ("logistic regression", "neural network")]
+b_boot = boot_13(b_scores, b_pairs)
+display(b_boot[["model", "versus", "pr_auc_diff", "ci_low", "ci_high", "share_a_better", "interval includes 0"]]
+        .style.format(FMT_13))
+for a_, b_ in b_pairs:
+    d_ = np.abs(b_scores[a_] - b_scores[b_])
+    print(f"{a_.split(' | ')[0]:<20}: max |Δ probability| {d_.max():.2e}, mean {d_.mean():.2e}")
+lr_coef = pd.DataFrame({o: b_models[f"logistic regression | {o}"].named_steps["clf"].coef_[0]
+                        for o in ("impute→scale", "scale→impute")},
+                       index=b_models["logistic regression | impute→scale"].named_steps["prep"].get_feature_names_out())
+print("logistic-regression coefficients that differ by more than 0.01 between the two orders:")
+display(lr_coef[(lr_coef.diff(axis=1).iloc[:, 1].abs() > 0.01)].round(3))"""),
+    code("""tr = ev.split_rows(meta, "train")
+raw_q = X.loc[tr, "quali_position"]
+versions = {"raw (observed only)": raw_q.dropna()}
+for o in ("impute→scale", "scale→impute"):
+    prep_o = b_models[f"logistic regression | {o}"].named_steps["prep"]
+    versions[o] = prep_o.transform(X.loc[tr])["quali_position"]
+summary_q = pd.DataFrame({k: {"rows": len(v), "mean": v.mean(), "SD": v.std(ddof=0),
+                              "value given to missing rows": np.nan if k.startswith("raw") else
+                              v[raw_q.isna().to_numpy()].iloc[0]} for k, v in versions.items()}).T
+print(f"quali_position on train: {raw_q.isna().mean():.1%} of rows missing")
+display(summary_q.round(3))
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4.2), facecolor=plots.SURFACE)
+for ax, (k, v), c in zip(axes, versions.items(), plots.SERIES):
+    ax.set_facecolor(plots.SURFACE)
+    ax.hist(v, bins=40, color=c, alpha=0.85)
+    ax.axvline(v.mean(), color=plots.INK, linewidth=1.2, linestyle="--")
+    plots.style_axes(ax, f"{k}\\nmean {v.mean():.2f}, SD {v.std(ddof=0):.2f}", xlabel="quali_position" +
+                     ("" if k.startswith("raw") else " (scaled)"), ylabel="train rows")
+fig.tight_layout()
+plt.show()"""),
+    md("""**Hypothesis check.**
+
+| | predicted | observed |
+|---|---|---|
+| logistic regression | equivalent | **practically equivalent:** PR-AUC 0.726 → 0.725 (Δ −0.001, CI −0.004 to +0.001); same threshold, F1, precision and recall; largest change in a probability 0.008 (mean 0.0004) |
+| neural network | equivalent | **same quality, different predictions:** PR-AUC 0.753 → 0.754 (Δ +0.001, CI −0.007 to +0.011), F1 0.710 → 0.713; but best epoch 47 → 41, threshold 0.344 → 0.376, largest change in a probability 0.078 (mean 0.009) |
+
+**Explanation.**
+- **The two orders differ only in scale and shift.** `quali_position` is missing for 63.1% of training rows. Impute →
+  scale gives mean 0.000 and SD 1.000, with missing rows at −0.035. Scale → impute standardises with the observed rows
+  only (mean 11.37, SD 6.36), so after filling the column has mean −0.036 and **SD 0.608**: the 63% of filled rows are
+  one constant, which squeezes the spread.
+- **Logistic regression compensates almost exactly.** Its `quali_position` coefficient grows from −0.294 to −0.489; a
+  pure rescaling would need −0.294 / 0.608 = −0.483, so the model learned nearly the same function (the intercept absorbs
+  the shift). The small remainder is consistent with the **L2 penalty**, which is not scale-invariant: a column with a
+  smaller spread needs a larger weight, and a larger weight costs more penalty. All other coefficients move by less than
+  0.01. With C = 1 and 22,624 rows the penalty is weak, so the effect is tiny.
+- **The network is more sensitive to scale.** The same affine change alters the starting point of training (weights are
+  initialised for unit-scale inputs), the size of the gradients Adam sees, and so the whole training path; early
+  stopping then picks a different epoch. Weight decay is 0 in the frozen configuration, so here the difference comes
+  from the optimisation path rather than the penalty (with weight decay > 0 the penalty would add the same scale effect
+  as in logistic regression). The result has the same overall ranking quality (the difference is well inside the noise)
+  but different scores for individual rows: about the size of change a different seed would cause.
+
+**Decision (Recommendation):** keep impute → scale. It gives the documented mean 0 / SD 1 inputs, keeps the coefficients
+in 10.2 comparable across features, and the other order offers no measurable gain."""),
+
+    md("""### 13.4 Feature-group ablation
+
+- **Hypothesis:** grid position carries most of the signal (it had the largest coefficient in 10.2); the other groups
+  each add a little, and some may add nothing measurable on 39 races.
+- **Change:** logistic regression is refitted (same frozen parameters) with **one group removed at a time**; plus two
+  cumulative baselines, **grid only** and **grid + qualifying only**. Each variant gets its own validation threshold.
+  The groups are `config.FEATURE_GROUPS`; a test checks that every feature is in exactly one group and that each
+  ablation removes exactly its group's columns.
+- **How the groups are cut matters:**
+  - **Dropping "qualifying" also drops `has_quali`.** That flag is 0 for 63% of training rows (no qualifying data
+    before 1994, patchy to 2002), so it also acts as an **era proxy**, not only as "qualifying information".
+  - **The `*_races_before` columns (career length) sit in the form groups** (driver form and constructor form), so
+    dropping a form group also drops experience.
+  - `is_round_1` sits with season standings (it flags their missing values at round 1)."""),
+    code("""groups_view = pd.DataFrame([(g, ", ".join(c)) for g, c in config.FEATURE_GROUPS.items()],
+                           columns=["group", "columns"]).set_index("group")
+display(groups_view)
+abl_table, abl_scores, abl_models = xp.run_ablation(meta, X, y)
+assert np.allclose(abl_scores["full model"], val_scores["logistic regression"])
+for name, m in abl_models.items():
+    assert m.named_steps["clf"].n_features_in_ == abl_table.loc[name, "n_features"]
+abl_boot = boot_13(abl_scores, [(n, "full model") for n in abl_scores if n != "full model"]).set_index("model")
+abl_view = abl_table[["n_features"] + VIEW_13[2:]].join(
+    abl_boot[["pr_auc_diff", "ci_low", "ci_high", "share_a_better", "interval includes 0"]])
+abl_view["val_roc_auc − full"] = abl_view["val_roc_auc"] - abl_view.loc["full model", "val_roc_auc"]
+abl_view["val_f1 − full"] = abl_view["val_f1"] - abl_view.loc["full model", "val_f1"]
+display(abl_view.style.format({**FMT_13, "val_roc_auc − full": "{:+.3f}", "val_f1 − full": "{:+.3f}"}, na_rep="ref"))
+
+plot_b = abl_boot.iloc[::-1]
+fig, ax = plots.new_figure(height=5.2)
+ys = np.arange(len(plot_b))
+cols_b = [plots.SERIES[1] if n.endswith("only") else plots.SERIES[0] for n in plot_b.index]
+ax.barh(ys, plot_b["pr_auc_diff"], color=cols_b, height=0.6)
+ax.errorbar(plot_b["pr_auc_diff"], ys, xerr=np.vstack([plot_b["pr_auc_diff"] - plot_b["ci_low"],
+                                                       plot_b["ci_high"] - plot_b["pr_auc_diff"]]),
+            fmt="none", ecolor=plots.INK, capsize=4, linewidth=1.2)
+ax.axvline(0, color=plots.INK_MUTED, linewidth=1)
+ax.set_yticks(ys, plot_b.index)
+plots.style_axes(ax, "Validation PR-AUC minus full model (95% paired race bootstrap)",
+                 xlabel="Δ PR-AUC (negative = the variant is worse than the full model)")
+ax.grid(axis="x", color=plots.GRIDLINE, linewidth=0.8)
+fig.tight_layout()
+plt.show()"""),
+    md("""**Result** (Δ = variant minus full model on validation; the full model has PR-AUC 0.726, ROC-AUC 0.927, F1 0.702).
+
+| variant | features | Δ PR-AUC (95% CI) | Δ ROC-AUC | Δ F1 |
+|---|---|---|---|---|
+| without grid | 19 | −0.020 (−0.055 to +0.014) | −0.004 | −0.003 |
+| without season standings | 16 | −0.019 (−0.041 to +0.009) | −0.002 | +0.007 |
+| without qualifying | 19 | −0.003 (−0.014 to +0.005) | −0.002 | −0.010 |
+| without driver form | 16 | +0.001 (−0.009 to +0.009) | −0.001 | −0.001 |
+| without home | 20 | +0.000 (−0.001 to +0.001) | +0.000 | +0.000 |
+| without reliability | 20 | +0.003 (−0.002 to +0.009) | +0.000 | +0.003 |
+| without constructor form | 16 | +0.006 (−0.012 to +0.024) | +0.001 | +0.000 |
+| **grid only** | 2 | **−0.087 (−0.141 to −0.033)** | −0.017 | −0.010 |
+| **grid + qualifying only** | 4 | **−0.070 (−0.129 to −0.011)** | −0.011 | −0.010 |
+
+**Interpretation.**
+- **No single group is indispensable on its own:** removing any one group leaves an interval that includes 0. The largest
+  drops are grid (−0.020) and season standings (−0.019).
+- **But the groups matter together.** The two cumulative baselines are the only clear results: grid alone loses 0.087
+  and grid + qualifying still loses 0.070, so standings and form together add about 0.07 PR-AUC on top of the starting
+  order.
+- **Why single drops look small: the groups overlap.** Grid and qualifying position carry nearly the same information in
+  2020–2021 (almost every validation row has a qualifying position), so dropping one lets the other take over; season
+  standings and recent form both measure how strong a car and driver are right now. This redundancy is also why the
+  coefficients in 10.2 must not be read one at a time.
+- **The hypothesis is only half supported:** the starting order is the strongest single signal (grid only already
+  reaches 0.639, 4.3× the base rate), but on its own it is clearly not enough.
+- **Dropping "qualifying" also drops `has_quali`** (an era proxy on train), so its small Δ is "qualifying position + era
+  flag", not qualifying alone.
+- **Home and reliability add nothing measurable** (|Δ| ≤ 0.003). Dropping constructor form even scores +0.006, within
+  noise.
+
+**Decision (Recommendation):** keep all 21 features. No single drop is distinguishable from 0, and removing groups
+because they scored slightly higher on these 39 races would be selection on validation (optimistic). `is_home` and
+`con_mech_rate_last10` are candidates for a simpler model in a later milestone if interpretability becomes the
+priority."""),
+
+    md("""### 13.5 Section check and runtime"""),
+    code("""assert _file_state(final_test_path) == test_log_before_13, "section 13 must not write test results"
+print(f"test log unchanged by section 13: True | results/final_test.csv exists: {final_test_path.exists()} | "
+      f"section 13 runtime: {time.perf_counter() - t0_13:.1f} s")"""),
+    md("""**Summary of section 13** (validation only; the frozen model is unchanged; test not read).
+
+| experiment | result | decision |
+|---|---|---|
+| training window | 1996 and 2003 tie 1950; 2014 is worse (Δ −0.016, CI −0.033 to −0.002) | keep 1950–2019 |
+| A: preprocessing fitted on train + val | Δ PR-AUC −0.001 (CI −0.002 to +0.000), no label flips | Requirement: fit on train only (unchanged) |
+| B: scale → impute | LR Δ −0.001 (CI −0.004 to +0.001); NN Δ +0.001 (CI −0.007 to +0.011): same quality, different row-level scores | keep impute → scale |
+| ablation | no single group distinguishable; grid only −0.087 and grid + qualifying only −0.070 (both CIs exclude 0) | keep all 21 features |
+
+**Limits, again:** 39 validation races, so PR-AUC differences of about ±0.01–0.02 cannot be resolved. "Interval includes
+0" means not distinguishable at this size, not equal. If any variant were adopted *because* it scored best here, its
+validation score would be slightly optimistic; the honest number for the frozen model is the one-off test evaluation,
+which has not been run."""),
 
 ]
 
