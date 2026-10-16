@@ -177,6 +177,12 @@ print("split      : train <=", config.TRAIN_END_YEAR, "| val", config.VAL_YEARS,
       "| test >=", config.TEST_START_YEAR)
 print("seed       :", config.RANDOM_SEED)
 
+# Known, harmless third-party warnings (for example scikit-learn 1.6.1 + scipy 1.16), silenced for their exact messages
+# only; every other warning is still shown.
+from f1podium.compat import KNOWN_EXTERNAL_WARNINGS, silence_known_external_warnings
+silence_known_external_warnings()
+print(f"warnings   : {len(KNOWN_EXTERNAL_WARNINGS)} known external warning(s) silenced (see src/f1podium/compat.py)")
+
 # Per-run test lock: final_test_report refuses a second call for the same model while this log exists, so the log
 # is reset at the start of every run. Within one run each model can still be scored on test only once (section 14).
 from f1podium.evaluation import reset_final_test_log
