@@ -229,6 +229,34 @@ def freeze_hash(frozen: dict) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
+def check_freeze(live: dict, reference: dict, strict_keys, tolerant_model: str = "neural network",
+                 strict_tol: float = 5e-4, tolerant_tol: float = 0.02) -> list[str]:
+    """Compare this run's frozen choices (`live`) with the reference values; return notes for the tolerant model.
+
+    Raises AssertionError if a strict key differs or a threshold of any model other than `tolerant_model` differs by
+    `strict_tol` or more. The tolerant model's threshold, configuration and best epoch never fail: training it is not
+    bit-identical across platforms, so the differences are returned as notes (threshold within / OUTSIDE tolerant_tol).
+    """
+    for key in strict_keys:
+        if live[key] != reference[key]:
+            raise AssertionError(f"frozen {key!r} differs: {live[key]!r} vs reference {reference[key]!r}")
+    notes = []
+    for m, ref in reference["thresholds"].items():
+        diff = abs(live["thresholds"][m] - ref)
+        if m == tolerant_model:
+            notes.append(f"{m} threshold: this run {live['thresholds'][m]:.4f}, reference {ref:.4f} (|diff| {diff:.4f}; "
+                         f"{'within' if diff <= tolerant_tol else 'OUTSIDE'} the {tolerant_tol} cross-platform tolerance)")
+        elif diff >= strict_tol:
+            raise AssertionError(f"{m} threshold {live['thresholds'][m]} differs from reference {ref} by {diff:.4g}")
+    cfg = {k: v for k, v in live[tolerant_model].items() if k != "best_epoch"}
+    ref_cfg = {k: v for k, v in reference[tolerant_model].items() if k != "best_epoch"}
+    notes.append(f"{tolerant_model} grid winner: " + ("same as reference" if cfg == ref_cfg else f"{cfg} (reference {ref_cfg})"))
+    if "best_epoch" in reference[tolerant_model]:
+        notes.append(f"{tolerant_model} best epoch: this run {live[tolerant_model]['best_epoch']}, "
+                     f"reference {reference[tolerant_model]['best_epoch']}")
+    return notes
+
+
 def reset_final_test_log(results_dir: Path | None = None) -> int:
     """Delete <results_dir>/final_test.csv at the start of a notebook run; return how many rows it had.
 

@@ -289,3 +289,32 @@ def test_logistic_baseline_params_override_only_what_is_given():
     balanced = M.logistic_baseline(class_weight="balanced").named_steps["clf"]
     assert default.class_weight is None and balanced.class_weight == "balanced"
     assert (balanced.C, balanced.max_iter, balanced.solver) == (default.C, default.max_iter, default.solver)
+
+
+def _freeze_pair():
+    ref = {"features": ["a", "b"], "lr": {"C": 1.0}, "selected model": "lr",
+           "neural network": {"lr": 0.001, "best_epoch": 47},
+           "thresholds": {"lr": 0.2758, "rf": 0.2883, "neural network": 0.3435}}
+    live = {**ref, "thresholds": dict(ref["thresholds"]), "neural network": dict(ref["neural network"])}
+    return live, ref
+
+
+def test_check_freeze_tolerates_the_nn_across_platforms_but_not_the_deterministic_models():
+    live, ref = _freeze_pair()
+    keys = ("features", "lr", "selected model")
+    live["thresholds"]["neural network"] = 0.3451               # the Kaggle value
+    live["neural network"]["best_epoch"] = 44
+    notes = E.check_freeze(live, ref, keys)
+    assert any("0.3451" in n and "within" in n for n in notes) and any("best epoch: this run 44" in n for n in notes)
+    live["thresholds"]["neural network"] = 0.40                 # far off: still only a note, flagged
+    assert any("OUTSIDE" in n for n in E.check_freeze(live, ref, keys))
+    live["neural network"]["lr"] = 0.003                        # a different grid winner: a note too
+    assert any("reference" in n and "grid winner" in n for n in E.check_freeze(live, ref, keys))
+    live, ref = _freeze_pair()
+    live["thresholds"]["lr"] = 0.2770                           # deterministic model drifted: fails
+    with pytest.raises(AssertionError, match="lr threshold"):
+        E.check_freeze(live, ref, keys)
+    live, ref = _freeze_pair()
+    live["selected model"] = "rf"                               # a different decision: fails
+    with pytest.raises(AssertionError, match="selected model"):
+        E.check_freeze(live, ref, keys)

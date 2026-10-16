@@ -2777,7 +2777,11 @@ nn_view.columns = [c.replace("param_", "") for c in nn_view.columns]
 fmt = {c: "{:.3f}" for c in ["val_pr_auc", "val_roc_auc", "val_f1", "val_precision", "val_recall", "threshold",
                              "train_pr_auc", "gap_pr_auc"]}
 display(nn_view.style.format(fmt).apply(lambda r: ["font-weight: bold" if r["chosen"] else "" for _ in r], axis=1))"""),
-    md("""**What it shows.**
+    md("""> *Neural-network figures in this cell come from the local reference run (Windows, CPU) and are approximate:
+> ±0.01 across platforms (best epochs can differ by a few). PyTorch training is deterministic on one platform but not
+> bit-identical across CPUs and builds; the printed output above is authoritative for the run you are reading.*
+
+**What it shows.**
 - **The 24 variants are close:** validation PR-AUC 0.737–0.753, ROC-AUC 0.926–0.932, F1 0.700–0.721. The winner
   (0.753) is not meaningfully ahead of the next three (0.752, 0.751, 0.750), so the choice among them is close to a
   coin flip.
@@ -2815,7 +2819,11 @@ for ax in axes:
     ax.legend(frameon=False, fontsize=9, labelcolor=plots.INK_MUTED)
 fig.tight_layout()
 plt.show()"""),
-    md("""**What it shows.**
+    md("""> *Neural-network figures in this cell come from the local reference run (Windows, CPU) and are approximate:
+> ±0.01 across platforms (best epochs can differ by a few). PyTorch training is deterministic on one platform but not
+> bit-identical across CPUs and builds; the printed output above is authoritative for the run you are reading.*
+
+**What it shows.**
 - **Both losses fall steeply for about five epochs and then flatten.** Validation PR-AUC reaches about 0.72 by
   epoch 9 and then creeps up to 0.74–0.753 with ±0.005 wobble.
 - **The "best epoch" is not sharply better than its neighbours:** 0.753 at epoch 47 against 0.748 at the last epoch (57).
@@ -2850,7 +2858,11 @@ counts = pd.concat({
     "validation": cmp_all[["val_tp", "val_fp", "val_fn", "val_tn"]].rename(columns=lambda c: c[len("val_"):]),
 }, axis=1)
 display(counts)"""),
-    md("""**What it shows.**
+    md("""> *Neural-network figures in this cell come from the local reference run (Windows, CPU) and are approximate:
+> ±0.01 across platforms (best epochs can differ by a few). PyTorch training is deterministic on one platform but not
+> bit-identical across CPUs and builds; the printed output above is authoritative for the run you are reading.*
+
+**What it shows.**
 - **The network has the highest validation PR-AUC and ROC-AUC of the six models:** PR-AUC 0.753 (5.0× the 0.150 base
   rate), ROC-AUC 0.932. Next come gradient boosting 0.727, logistic regression 0.726 and random forest 0.719.
 - **Its F1 at the frozen threshold (0.710) ties gradient boosting,** and the four learned models are within 0.008 of
@@ -2879,7 +2891,11 @@ display(boot_all.set_index(["versus", "model"])[["pr_auc_diff", "ci_low", "ci_hi
         .style.format({"pr_auc_diff": "{:+.3f}", "ci_low": "{:+.3f}", "ci_high": "{:+.3f}",
                        "share_a_better": "{:.1%}"}))
 print("resamples:", int(boot_all["B"].iloc[0]), "| skipped (single class):", int(boot_all["skipped"].iloc[0]))"""),
-    md("""**What it shows.**
+    md("""> *Neural-network figures in this cell come from the local reference run (Windows, CPU) and are approximate:
+> ±0.01 across platforms (best epochs can differ by a few). PyTorch training is deterministic on one platform but not
+> bit-identical across CPUs and builds; the printed output above is authoritative for the run you are reading.*
+
+**What it shows.**
 - **The network is clearly better than the grid rule:** +0.114 PR-AUC (95% interval +0.074 to +0.152; better in
   100% of resamples).
 - **It is not distinguishable from logistic regression:** +0.027 (−0.006 to +0.056); it is ahead in 94% of resamples, but
@@ -2907,7 +2923,11 @@ plots.style_axes(axes[1], "ROC (validation)", xlabel="false positive rate", ylab
 axes[0].legend(frameon=False, fontsize=8.5, labelcolor=plots.INK_MUTED, loc="upper right")
 fig.tight_layout()
 plt.show()"""),
-    md("""**What it shows.**
+    md("""> *Neural-network figures in this cell come from the local reference run (Windows, CPU) and are approximate:
+> ±0.01 across platforms (best epochs can differ by a few). PyTorch training is deterministic on one platform but not
+> bit-identical across CPUs and builds; the printed output above is authoritative for the run you are reading.*
+
+**What it shows.**
 - **The network's precision-recall curve is higher only at low recall (0.1–0.3):** its best precision there is
   1.00 / 0.95 / 0.95, against 0.86–0.94 for the other learned models. Only about 35 podiums (30% of 117) sit in that part
   of the curve, so a handful of rows decide it. This is where its PR-AUC advantage comes from.
@@ -2946,7 +2966,11 @@ display(rule.set_index("versus")[["pr_auc_diff", "ci_low", "ci_high", "interval 
         .style.format({f"PR-AUC diff ({best_name} − versus)": "{:+.3f}", "ci_low": "{:+.3f}", "ci_high": "{:+.3f}"}))
 print("candidates (reference + models not distinguishable from it):", candidates)
 print("selected by the rule:", selected)"""),
-    md("""**What it shows.**
+    md("""> *Neural-network figures in this cell come from the local reference run (Windows, CPU) and are approximate:
+> ±0.01 across platforms (best epochs can differ by a few). PyTorch training is deterministic on one platform but not
+> bit-identical across CPUs and builds; the printed output above is authoritative for the run you are reading.*
+
+**What it shows.**
 - **Highest validation PR-AUC: the neural network (0.753).** Its paired-bootstrap intervals against logistic
   regression (−0.006 to +0.056), random forest (−0.009 to +0.073) and gradient boosting (−0.014 to +0.061) all include 0.
   Only the two naive rules are clearly worse (intervals above 0).
@@ -3161,7 +3185,11 @@ for ax, (k, v), c in zip(axes, versions.items(), plots.SERIES):
                      ("" if k.startswith("raw") else " (scaled)"), ylabel="train rows")
 fig.tight_layout()
 plt.show()"""),
-    md("""**Hypothesis check.**
+    md("""> *Neural-network figures in this cell come from the local reference run (Windows, CPU) and are approximate:
+> ±0.01 across platforms (best epochs can differ by a few). PyTorch training is deterministic on one platform but not
+> bit-identical across CPUs and builds; the printed output above is authoritative for the run you are reading.*
+
+**Hypothesis check.**
 
 | | predicted | observed |
 |---|---|---|
@@ -3271,7 +3299,11 @@ priority."""),
     code("""assert _file_state(final_test_path) == test_log_before_13, "section 13 must not write test results"
 print(f"test log unchanged by section 13: True | results/final_test.csv exists: {final_test_path.exists()} | "
       f"section 13 runtime: {time.perf_counter() - t0_13:.1f} s")"""),
-    md("""**Summary of section 13** (validation only; the frozen model is unchanged; test not read).
+    md("""> *Neural-network figures in this cell come from the local reference run (Windows, CPU) and are approximate:
+> ±0.01 across platforms (best epochs can differ by a few). PyTorch training is deterministic on one platform but not
+> bit-identical across CPUs and builds; the printed output above is authoritative for the run you are reading.*
+
+**Summary of section 13** (validation only; the frozen model is unchanged; test not read).
 
 | experiment | result | decision |
 |---|---|---|
@@ -3309,12 +3341,30 @@ which follows once, in section 14."""),
 
     md("""### 14.1 Freeze
 
-The values below are written out by hand (what sections 10–13 decided) and asserted against the live objects of
-this run. If anything had drifted, the cell would stop before the test split is opened. The hash identifies this exact
-set of choices so the report can cite it."""),
+**What is frozen, and how it is checked.** Every choice below was made on validation in sections 10–13. The cell reads
+the values **live from this run** (thresholds from the validation tuning in 11.4 / 12.3, configurations from the fitted
+objects). `FREEZE_HASH` is computed from these live values; it identifies this exact set of choices so the report can cite it.
+
+**Strict checks (the cell stops before test is opened if any fails):**
+- the choices that do not depend on how a network trains must equal the reference written below: the 21 features, the
+  training window, the logistic-regression / random-forest / gradient-boosting configurations and the final model
+  chosen by the 12.6 rule;
+- the thresholds of the two naive rules, logistic regression, random forest and gradient boosting must match the
+  reference within 5e-4 (these models are deterministic across platforms);
+- the fitted models must still reproduce their stored validation scores exactly (same objects as in sections 11–12);
+- after test scoring (14.2) the thresholds must be **exactly** unchanged and the freeze hash **identical**.
+
+**Tolerant check for the neural network (note, not failure).** The network is seeded and deterministic *on one
+platform*, but floating-point arithmetic in PyTorch differs slightly between CPUs and builds. The same code then
+trains to slightly different weights: on Kaggle (Python 3.13, torch 2.11.0+cpu) its validation threshold was 0.3451,
+against 0.3435 in the local reference run. Its threshold is therefore compared with a tolerance of 0.02 and a note is
+printed with both values; its best epoch and grid winner are reported against the reference the same way. **The NN part
+of the freeze, and therefore `FREEZE_HASH`, can differ slightly across platforms.** Within one run the freeze is still
+strict: nothing may change between the freeze and the end of test scoring."""),
     code("""import json, time
 t0_14 = time.perf_counter()
-FROZEN_EXPECTED = {
+# Reference values: what sections 10-13 decided in the local reference run.
+REFERENCE = {
     "features": ["grid_filled", "pit_lane_start", "quali_position", "has_quali", "is_round_1", "is_home",
                  "drv_points_before", "drv_rank_before", "con_points_before", "con_rank_before",
                  "drv_podium_rate_last3", "drv_podium_rate_last5", "drv_mean_pos_last3", "drv_mean_pos_last5",
@@ -3329,14 +3379,16 @@ FROZEN_EXPECTED = {
                                "class_weight": None, "random_state": 42},
     "neural network": {"hidden_sizes": [32], "dropout": 0.0, "weight_decay": 0.0, "lr": 0.001, "batch_size": 256,
                        "max_epochs": 100, "patience": 10, "seed": 42, "best_epoch": 47},
-    "thresholds": {"naive: -grid": -3.0, "naive: -quali (fallback -grid)": -3.0, "logistic regression": 0.276,
-                   "random forest": 0.288, "hist gradient boosting": 0.287, "neural network": 0.344},
+    "thresholds": {"naive: -grid": -3.0, "naive: -quali (fallback -grid)": -3.0, "logistic regression": 0.2758,
+                   "random forest": 0.2883, "hist gradient boosting": 0.2872, "neural network": 0.3435},
     "selected model": "logistic regression",
 }
+STRICT_TOL, NN_TOL = 5e-4, 0.02
+STRICT_KEYS = ("features", "split", "logistic regression", "random forest", "hist gradient boosting", "selected model")
 test_models = {**final_models, "neural network": nn_final}
 
 def live_freeze():
-    # The same quantities, read from the objects that will actually be scored.
+    # The frozen choices, read live from the objects that will actually be scored (this run's values).
     clf = {m: test_models[m].named_steps["clf"].get_params() for m in
            ("logistic regression", "random forest", "hist gradient boosting")}
     nn_p = nn_final.get_params()
@@ -3344,49 +3396,58 @@ def live_freeze():
         "features": list(X.columns),
         "split": {"train": [config.TRAIN_START_YEAR, config.TRAIN_END_YEAR], "validation": list(config.VAL_YEARS),
                   "test_from": config.TEST_START_YEAR},
-        **{m: {k: clf[m][k] for k in FROZEN_EXPECTED[m]} for m in clf},
+        **{m: {k: clf[m][k] for k in REFERENCE[m]} for m in clf},
         "neural network": {**{k: (list(nn_p[k]) if k == "hidden_sizes" else nn_p[k])
-                              for k in FROZEN_EXPECTED["neural network"] if k != "best_epoch"},
+                              for k in REFERENCE["neural network"] if k != "best_epoch"},
                            "best_epoch": int(nn_final.best_epoch_)},
         "thresholds": {m: round(float(cmp_all.loc[m, "threshold"]), 4) for m in test_models},
         "selected model": selected,
     }
 
 live = live_freeze()
-for key, expected in FROZEN_EXPECTED.items():
-    if key == "thresholds":
-        for m, t in expected.items():
-            assert abs(live[key][m] - t) < 5e-4, (m, live[key][m], t)
-    else:
-        assert live[key] == expected, (key, live[key], expected)
-# the fitted models are the ones evaluated on validation (inputs and validation scores unchanged)
+# 1-3. strict for everything that does not depend on network training; notes (never failures) for the NN
+nn_notes = ev.check_freeze(live, REFERENCE, STRICT_KEYS, strict_tol=STRICT_TOL, tolerant_tol=NN_TOL)
+# 4. the fitted models are the ones evaluated on validation (inputs and validation scores unchanged, same run)
 vrows_14 = ev.split_rows(meta, "validation")
 for m, model in test_models.items():
     if hasattr(model, "named_steps"):
-        assert list(model.named_steps["prep"].get_feature_names_out()) == FROZEN_EXPECTED["features"]
+        assert list(model.named_steps["prep"].get_feature_names_out()) == REFERENCE["features"]
     stored = nn_val_scores if m == "neural network" else val_scores[m]
     assert np.array_equal(ev.scores(model, X.loc[vrows_14]), stored), m
-assert list(nn_final.prep_.get_feature_names_out()) == FROZEN_EXPECTED["features"]
+assert list(nn_final.prep_.get_feature_names_out()) == REFERENCE["features"]
 assert not final_test_path.exists(), "the test log must be empty before section 14"
 
-FREEZE_HASH = ev.freeze_hash(live)
-freeze_view = pd.DataFrame({"frozen value": {
-    "features": f"{len(live['features'])} columns (sections 9 and 13.4)",
-    "training window": f"{live['split']['train'][0]}–{live['split']['train'][1]} (13.1)",
-    **{f"{m} config": json.dumps(live[m]) for m in ("logistic regression", "random forest",
-                                                   "hist gradient boosting", "neural network")},
-    **{f"threshold: {m}": f"{t:.4f}" for m, t in live["thresholds"].items()},
-    "final model (rule 12.6)": live["selected model"],
-}})
-with pd.option_context("display.max_colwidth", 140):
+THRESHOLDS_FROZEN = cmp_all.loc[list(test_models), "threshold"].astype(float).copy()   # full precision, this run
+FREEZE_HASH = ev.freeze_hash(live)                                                     # from LIVE values
+freeze_view = pd.DataFrame({
+    "this run (live)": {
+        "features": f"{len(live['features'])} columns (sections 9 and 13.4)",
+        "training window": f"{live['split']['train'][0]}–{live['split']['train'][1]} (13.1)",
+        **{f"{m} config": json.dumps(live[m]) for m in ("logistic regression", "random forest",
+                                                       "hist gradient boosting", "neural network")},
+        **{f"threshold: {m}": f"{t:.4f}" for m, t in live["thresholds"].items()},
+        "final model (rule 12.6)": live["selected model"]},
+    "reference": {
+        "features": f"{len(REFERENCE['features'])} columns",
+        "training window": f"{REFERENCE['split']['train'][0]}–{REFERENCE['split']['train'][1]}",
+        **{f"{m} config": json.dumps(REFERENCE[m]) for m in ("logistic regression", "random forest",
+                                                            "hist gradient boosting", "neural network")},
+        **{f"threshold: {m}": f"{t:.4f}" for m, t in REFERENCE["thresholds"].items()},
+        "final model (rule 12.6)": REFERENCE["selected model"]},
+})
+with pd.option_context("display.max_colwidth", 120):
     display(freeze_view)
-print("FREEZE_HASH =", FREEZE_HASH, "| run commit:", RUN_COMMIT)"""),
+for note in nn_notes:
+    print("note:", note)
+print("FREEZE_HASH =", FREEZE_HASH, "(from this run's live values; the NN part can differ across platforms) "
+      "| run commit:", RUN_COMMIT)"""),
 
     md("""### 14.2 Score every model on test, once
 
 Each model is passed to `final_test_report` exactly once, with its frozen validation threshold. The function logs
 each run (with race-level bootstrap 95% CIs, B = 1000, seed 42) to `results/final_test.csv`. A second call for the
-same model is refused, shown at the end of the cell. After scoring, the freeze is recomputed and must be unchanged."""),
+same model is refused, shown at the end of the cell. After scoring, the thresholds must be exactly unchanged and the
+freeze hash, recomputed from the live values, identical."""),
     code("""test_recs, test_frames = {}, {}
 for name, model in test_models.items():
     test_recs[name], test_frames[name] = ev.final_test_report(
@@ -3403,6 +3464,7 @@ except RuntimeError as exc:
     print("second call refused, as intended:", str(exc).split(" (")[0])
 assert len(pd.read_csv(final_test_path)) == len(test_models)
 
+pd.testing.assert_series_equal(cmp_all.loc[list(test_models), "threshold"].astype(float), THRESHOLDS_FROZEN)
 assert ev.freeze_hash(live_freeze()) == FREEZE_HASH, "test results must not change any frozen choice"
 tf = next(iter(test_frames.values()))
 test_years = sorted(meta.loc[tf.index, "year"].unique())
@@ -3516,6 +3578,11 @@ print(f"section 14 runtime: {time.perf_counter() - t0_14:.1f} s")"""),
 naive rules: +0.070 PR-AUC over −grid (95% CI +0.028 to +0.106) and +0.091 over −quali (+0.053 to +0.128), ahead in all
 1,000 resamples, which matches the validation result (+0.087 over −grid in 12.4); no decision was, or is, taken from it."""),
     md("""### 14.5 Results
+
+> *Neural-network figures in this cell come from the local reference run (Windows, CPU) and are approximate:
+> ±0.01 across platforms (best epochs can differ by a few). PyTorch training is deterministic on one platform but not
+> bit-identical across CPUs and builds; the printed output above is authoritative for the run you are reading.*
+
 
 **Test set:** seasons 2022–2024, 68 races, 1,357 rows, 204 podiums, base rate 15.0% (train 13.4%, validation 15.0%).
 Intervals are race-level bootstrap 95% CIs on test.
