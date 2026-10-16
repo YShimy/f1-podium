@@ -628,7 +628,7 @@ Decisions are labelled D1, D2, … and recorded in full in section 6.
 | 85 duplicated `(raceId, driverId)` pairs, mostly 1950s shared drives | 3.4, 4.2 | **D1** Shared-drive rule | Rule B: target-blind heuristic (started row, lowest grid, lowest resultId; see 6.3) | **Decided** |
 | 11 Indianapolis 500 races (1950–1960); they also hold 21 of the 85 duplicate pairs | 4.2 | **D2** Indy 500 exclusion | Exclude races at the Indianapolis circuit in 1950–1960 (see 6.1) | **Decided** |
 | About 1,500 entries that never started (DNQ, DNPQ, 107% rule, withdrawn without a grid slot) | 4.1, 4.1b | **D3** Non-starters | Exclude by status, plus grid for *Withdrew* (see 6.2) | **Decided** |
-| … | 3.5, 4.3 | Missing-qualifying strategy / training window | … | Pending |
+| Qualifying missing before 1994, patchy to 2002, complete from 2003 | 3.5, 4.3 | Missing-qualifying strategy / training window | Training-median imputation inside the pipeline + `has_quali` flag; train from 1950 (tested in 13.1) | **Decided** |
 | `grid = 0` means "did not start" before 2000 and mostly "pit-lane start" after 2010 | 3.6, 4.1 | Meaning of `grid = 0` **as a feature** | After cleaning, a pit-lane start: `pit_lane_start = 1`, `grid_filled` = number of starters (see 9) | **Decided** |
 | `results.points` excludes sprint points (2021–2024) | 9.5 | Sprint data | Sprint points of **earlier** rounds count towards `points_before`; the current round's sprint is never used (see 9) | **Decided** |"""),
 
@@ -676,7 +676,7 @@ def log_rows(step: str) -> pd.DataFrame:
 **Choice: C.** Exclude every `results` row of a race held at the circuit with `circuitRef == "indianapolis"`
 in 1950–1960 (inclusive).
 
-**Why** *(drafted for your review)*. The Indy 500 was run to American (AAA/USAC) rules, with its own qualifying format
+**Why.** The Indy 500 was run to American (AAA/USAC) rules, with its own qualifying format
 and a field almost entirely separate from the Grand Prix regulars. Its entries therefore say little about the
 podium chances of an F1 field after qualifying, which is what we predict.
 
@@ -721,7 +721,7 @@ the cars that line up after qualifying, so these rows are not part of the popula
 - its status is *Did not qualify*, *Did not prequalify* or *107% Rule*, whatever its grid; **or**
 - its status is *Withdrew* **and** `grid == 0`.
 
-**Why status is acceptable here.** CLAUDE.md lists `status` as a post-race column, and it is never used as a
+**Why status is acceptable here.** The project rules list `status` as a post-race column, and it is never used as a
 **feature**. Here it is used only to define *which rows are in the population*, and only through values that are
 settled by qualifying:
 - not qualifying, not prequalifying and failing the 107% rule are all decided in qualifying, so they are known at our cutoff;
@@ -984,7 +984,8 @@ display(by_status_era)"""),
 
 How does the cleaned table (`results_clean`, section 6) differ from raw `results`, and what does the cleaned data say
 about the decisions that are still open (training window, missing-qualifying strategy, `grid = 0` as a feature)?
-**Descriptive only:** nothing here changes the data or decides anything.
+**Descriptive only:** nothing here changes the data or decides anything. The decisions called open in this section
+were taken later: `grid = 0` in section 9, missing qualifying in sections 9–10, the training window in 13.1.
 
 **Definitions used in this section**
 - **Podium:** `positionOrder <= 3` (the project target). It is used here only to describe the data.
@@ -2002,7 +2003,8 @@ so the target can never slip into the features. Code: `src/f1podium/features.py`
   for unrelated teams (Renault 1977–85, Mercedes 1954–55, Aston Martin 1959–60) are kept apart. The `constructorId`
   variant stays available for an ablation. Constructor rows are aggregated to one row per (lineage, race) **before**
   shifting, so a teammate's result in the same race never enters a feature.
-- **Still open:** the training window and the missing-qualifying strategy (the table keeps NaN plus `has_quali`)."""),
+- **Decided later:** the table keeps NaN plus `has_quali`; each model pipeline imputes training medians (section 10),
+  and the training window stays 1950–2019 (13.1)."""),
     code("""from f1podium import features as feats
 from f1podium import leakage
 
@@ -2038,7 +2040,7 @@ print("qualifying coverage by season, 1994–2003:", q_cov.loc[1994:2003].round(
     md("""**What it shows.**
 - **`quali_position` is the only feature with large gaps:** 57.7% missing overall (63.1% in train). It is missing for
   every season before 1994, patchy in 1994–2002 (coverage 6%–100% per season), and complete from 2003 (0.1% missing in
-  validation, 0% in test). `has_quali` marks it. How to fill it is still an open decision, for the pipeline.
+  validation, 0% in test). `has_quali` marks it. It is filled with the training median inside each model pipeline (section 10).
 - **`rank_before` is NaN on round-1 rows only** (6.5%), by design.
 - **Form features are NaN only without history:** driver form 2.8% (career debuts; 14% of rows in the 1950s, 1% from
   2000), constructor form and mechanical rate 0.9% (223 rows: a lineage's first race; 265 rows if keyed by
@@ -2984,8 +2986,8 @@ print("selected by the rule:", selected)"""),
   **logistic regression**, so **the rule selects logistic regression** (`class_weight=None`, validation threshold 0.276).
 - **How to read it:** this is the outcome of the rule on validation evidence, not a claim that logistic regression is
   more accurate. The data cannot separate the four learned models on 39 races; when evidence is a tie, the rule prefers
-  the model that can be explained and audited. Nothing has been evaluated on test at this point. If you accept the rule as written,
-  that choice and its frozen threshold are what the one-off test run would use."""),
+  the model that can be explained and audited. Nothing has been evaluated on test at this point. That choice and its frozen threshold are
+  what the one-off test run in section 14 uses."""),
 
     md("""## 13. Experiments (validation only)
 
